@@ -21,7 +21,11 @@ import Text.Ginger.Parse (parseGinger', mkParserOptions, ParserOptions(..))
 import Text.Ginger.TH.Types
 import Text.Ginger.TH.Builtins (isBuiltin, builtinNames)
 import Text.Ginger.TH.Extract (extractFromTemplate, extractVariableAccesses)
-import Text.Ginger.TH.Validate (validatePath, validatePaths, formatValidationError, SchemaRegistry)
+import Text.Ginger.TH.Schema (generateSchema, SchemaRegistry)
+import Text.Ginger.TH.Validate (validatePath, validatePaths, formatValidationError)
+
+-- Import test types from separate module (required for TH to see them)
+import Text.Ginger.TH.TestTypes
 
 -- | All TH-related tests
 thTests :: TestTree
@@ -29,6 +33,8 @@ thTests = testGroup "Template Haskell Type Checking"
   [ builtinTests
   , extractionTests
   , validationTests
+  , schemaGenerationTests
+  , endToEndTests
   , propertyTests
   ]
 
@@ -320,6 +326,264 @@ nullResolver _ = return Nothing
 -- | Dummy source position for testing.
 dummyPos :: SourcePos
 dummyPos = newPos "test" 1 1
+
+--------------------------------------------------------------------------------
+-- Schema Generation Tests (using compile-time TH)
+--------------------------------------------------------------------------------
+
+-- Generate schemas at compile time
+simpleRecordSchema :: (Schema, SchemaRegistry)
+simpleRecordSchema = $( do
+  (s, r) <- generateSchema ''SimpleRecord
+  [| (s, r) |]
+ )
+
+nestedRecordSchema :: (Schema, SchemaRegistry)
+nestedRecordSchema = $( do
+  (s, r) <- generateSchema ''NestedRecord
+  [| (s, r) |]
+ )
+
+contentTypeSchema :: (Schema, SchemaRegistry)
+contentTypeSchema = $( do
+  (s, r) <- generateSchema ''ContentType
+  [| (s, r) |]
+ )
+
+animalSchema :: (Schema, SchemaRegistry)
+animalSchema = $( do
+  (s, r) <- generateSchema ''Animal
+  [| (s, r) |]
+ )
+
+treeSchema :: (Schema, SchemaRegistry)
+treeSchema = $( do
+  (s, r) <- generateSchema ''Tree
+  [| (s, r) |]
+ )
+
+withListSchema :: (Schema, SchemaRegistry)
+withListSchema = $( do
+  (s, r) <- generateSchema ''WithList
+  [| (s, r) |]
+ )
+
+withMaybeSchema :: (Schema, SchemaRegistry)
+withMaybeSchema = $( do
+  (s, r) <- generateSchema ''WithMaybe
+  [| (s, r) |]
+ )
+
+withVectorSchema :: (Schema, SchemaRegistry)
+withVectorSchema = $( do
+  (s, r) <- generateSchema ''WithVector
+  [| (s, r) |]
+ )
+
+userIdSchema :: (Schema, SchemaRegistry)
+userIdSchema = $( do
+  (s, r) <- generateSchema ''UserId
+  [| (s, r) |]
+ )
+
+withTypeSynonymSchema :: (Schema, SchemaRegistry)
+withTypeSynonymSchema = $( do
+  (s, r) <- generateSchema ''WithTypeSynonym
+  [| (s, r) |]
+ )
+
+schemaGenerationTests :: TestTree
+schemaGenerationTests = testGroup "Schema Generation"
+  [ testCase "simple record generates RecordSchema" $ do
+      let (schema, _) = simpleRecordSchema
+      case schema of
+        RecordSchema fields -> do
+          assertEqual "should have 2 fields" 2 (length fields)
+          assertBool "should have srName" $ any ((== "srName") . fst) fields
+          assertBool "should have srAge" $ any ((== "srAge") . fst) fields
+        _ -> assertFailure $ "expected RecordSchema, got: " ++ show schema
+
+  , testCase "nested record generates nested schema" $ do
+      let (schema, _) = nestedRecordSchema
+      case schema of
+        RecordSchema fields -> do
+          assertEqual "should have 2 fields" 2 (length fields)
+          case lookup "nrUser" fields of
+            Just (RecordSchema innerFields) ->
+              assertEqual "inner should have 2 fields" 2 (length innerFields)
+            Just other -> assertFailure $ "expected RecordSchema for nrUser, got: " ++ show other
+            Nothing -> assertFailure "missing nrUser field"
+        _ -> assertFailure $ "expected RecordSchema, got: " ++ show schema
+
+  , testCase "sum type generates SumSchema" $ do
+      let (schema, _) = contentTypeSchema
+      case schema of
+        SumSchema constructors -> do
+          assertEqual "should have 2 constructors" 2 (length constructors)
+          -- TextContent has 1 field, ImageContent has 2
+          let fieldCounts = map length constructors
+          assertBool "field counts should be [1,2] or [2,1]" $
+            fieldCounts == [1,2] || fieldCounts == [2,1]
+        _ -> assertFailure $ "expected SumSchema, got: " ++ show schema
+
+  , testCase "sum type with shared field" $ do
+      let (schema, registry) = animalSchema
+      case schema of
+        SumSchema constructors -> do
+          assertEqual "should have 2 constructors" 2 (length constructors)
+          -- animalName should be in both constructors
+          let hasAnimalName = all (any ((== "animalName") . fst)) constructors
+          assertBool "animalName should be in all constructors" hasAnimalName
+          -- Validate that animalName access is valid
+          let path = AccessPath "animalName" [] dummyPos
+          assertEqual "animalName should be accessible" Nothing $
+            validatePath registry schema path
+        _ -> assertFailure $ "expected SumSchema, got: " ++ show schema
+
+  , testCase "recursive type generates RecursiveRef" $ do
+      let (schema, registry) = treeSchema
+      case schema of
+        RecordSchema fields -> do
+          assertBool "should have treeChildren" $ any ((== "treeChildren") . fst) fields
+          case lookup "treeChildren" fields of
+            Just (ListSchema (RecursiveRef refName)) ->
+              assertEqual "should reference Tree" "Tree" refName
+            Just other -> assertFailure $ "expected ListSchema with RecursiveRef, got: " ++ show other
+            Nothing -> assertFailure "missing treeChildren field"
+          -- Validate deep access works
+          let path = AccessPath "treeChildren" [StaticKey "0", StaticKey "treeValue"] dummyPos
+          assertEqual "nested access should work" Nothing $
+            validatePath registry schema path
+        _ -> assertFailure $ "expected RecordSchema, got: " ++ show schema
+
+  , testCase "list field generates ListSchema" $ do
+      let (schema, _) = withListSchema
+      case schema of
+        RecordSchema fields ->
+          case lookup "wlItems" fields of
+            Just (ListSchema ScalarSchema) -> return ()
+            Just other -> assertFailure $ "expected ListSchema ScalarSchema, got: " ++ show other
+            Nothing -> assertFailure "missing wlItems field"
+        _ -> assertFailure $ "expected RecordSchema, got: " ++ show schema
+
+  , testCase "Maybe field treated as inner type" $ do
+      let (schema, _) = withMaybeSchema
+      case schema of
+        RecordSchema fields -> do
+          case lookup "wmOptional" fields of
+            Just ScalarSchema -> return ()  -- Maybe Text -> Text -> ScalarSchema
+            Just other -> assertFailure $ "expected ScalarSchema for Maybe, got: " ++ show other
+            Nothing -> assertFailure "missing wmOptional field"
+        _ -> assertFailure $ "expected RecordSchema, got: " ++ show schema
+
+  , testCase "Vector field generates ListSchema" $ do
+      let (schema, _) = withVectorSchema
+      case schema of
+        RecordSchema fields ->
+          case lookup "wvItems" fields of
+            Just (ListSchema ScalarSchema) -> return ()
+            Just other -> assertFailure $ "expected ListSchema ScalarSchema, got: " ++ show other
+            Nothing -> assertFailure "missing wvItems field"
+        _ -> assertFailure $ "expected RecordSchema, got: " ++ show schema
+
+  , testCase "newtype generates schema for wrapped type" $ do
+      let (schema, _) = userIdSchema
+      case schema of
+        RecordSchema fields -> do
+          assertEqual "should have 1 field" 1 (length fields)
+          assertBool "should have unUserId" $ any ((== "unUserId") . fst) fields
+        _ -> assertFailure $ "expected RecordSchema, got: " ++ show schema
+
+  , testCase "type synonym is transparent" $ do
+      let (schema, _) = withTypeSynonymSchema
+      case schema of
+        RecordSchema fields -> do
+          case lookup "wtsEmail" fields of
+            Just ScalarSchema -> return ()  -- Email = Text -> ScalarSchema
+            Just other -> assertFailure $ "expected ScalarSchema for type synonym, got: " ++ show other
+            Nothing -> assertFailure "missing wtsEmail field"
+        _ -> assertFailure $ "expected RecordSchema, got: " ++ show schema
+  ]
+
+--------------------------------------------------------------------------------
+-- End-to-End Tests (template + type validation)
+--------------------------------------------------------------------------------
+
+endToEndTests :: TestTree
+endToEndTests = testGroup "End-to-End Validation"
+  [ testCase "valid template against SimpleRecord" $ do
+      let (schema, registry) = simpleRecordSchema
+      paths <- parseAndExtract "{{ srName }} is {{ srAge }} years old"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      let errors = validatePaths registry schema userPaths
+      assertEqual "should have no errors" [] errors
+
+  , testCase "invalid field on SimpleRecord" $ do
+      let (schema, registry) = simpleRecordSchema
+      paths <- parseAndExtract "{{ srName }} {{ invalidField }}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      let errors = validatePaths registry schema userPaths
+      assertEqual "should have 1 error" 1 (length errors)
+      case head errors of
+        FieldNotFound _ field -> assertEqual "should be invalidField" "invalidField" field
+        other -> assertFailure $ "wrong error type: " ++ show other
+
+  , testCase "nested access on NestedRecord" $ do
+      let (schema, registry) = nestedRecordSchema
+      paths <- parseAndExtract "{{ nrUser.srName }} active: {{ nrActive }}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      let errors = validatePaths registry schema userPaths
+      assertEqual "should have no errors" [] errors
+
+  , testCase "sum type shared field access" $ do
+      let (schema, registry) = animalSchema
+      paths <- parseAndExtract "{{ animalName }}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      let errors = validatePaths registry schema userPaths
+      assertEqual "should have no errors (field in all constructors)" [] errors
+
+  , testCase "sum type non-shared field rejected" $ do
+      let (schema, registry) = animalSchema
+      paths <- parseAndExtract "{{ animalBreed }}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      let errors = validatePaths registry schema userPaths
+      assertEqual "should have 1 error" 1 (length errors)
+
+  , testCase "recursive type deep access" $ do
+      let (schema, registry) = treeSchema
+      -- Use bracket notation for list indexing
+      paths <- parseAndExtract "{{ treeChildren[0].treeChildren[0].treeValue }}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      let errors = validatePaths registry schema userPaths
+      assertEqual "should have no errors" [] errors
+
+  , testCase "list index access" $ do
+      let (schema, registry) = withListSchema
+      -- Use bracket notation for list indexing
+      paths <- parseAndExtract "{{ wlItems[0] }} count: {{ wlCount }}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      let errors = validatePaths registry schema userPaths
+      assertEqual "should have no errors" [] errors
+
+  , testCase "for loop with type checking" $ do
+      let (schema, registry) = withListSchema
+      paths <- parseAndExtract "{% for item in wlItems %}{{ item }}{% endfor %}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      -- Only wlItems should be extracted (item is bound by for loop)
+      assertEqual "should have 1 user path" 1 (length userPaths)
+      let errors = validatePaths registry schema userPaths
+      assertEqual "should have no errors" [] errors
+
+  , testCase "set binding with type checking" $ do
+      let (schema, registry) = simpleRecordSchema
+      paths <- parseAndExtract "{% set fullName = srName %}{{ fullName }}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      -- Only srName should be extracted (fullName is bound by set)
+      assertEqual "should have 1 user path" 1 (length userPaths)
+      assertEqual "should be srName" "srName" (apRoot $ head userPaths)
+      let errors = validatePaths registry schema userPaths
+      assertEqual "should have no errors" [] errors
+  ]
 
 --------------------------------------------------------------------------------
 -- Property Tests

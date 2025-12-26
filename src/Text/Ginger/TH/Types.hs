@@ -35,7 +35,7 @@ data Schema
   | RecursiveRef Text
     -- ^ Reference to a recursive type. Used to handle recursive data structures.
     -- The Text is the type name for resolution during validation.
-  deriving (Show, Eq, Data, Typeable)
+  deriving (Show, Eq, Data, Typeable, Lift)
 
 -- | A path segment in a variable access chain.
 data PathSegment
