@@ -1186,11 +1186,22 @@ testExprP = do
     pos <- getPosition
     keyword "is"
     spacesOrComment
-    funcName <- atomicExprP
-    args <- choice [groupP "(" ")" funcArgP
-                  , option [] $ funcArgP >>= (\a -> return [a])]
-    return $ \e -> CallE pos (addIsPrefix funcName) ((Nothing, e):args)
+    isDefinedTestP pos <|> regularTestP pos
     where
+      -- Special case for "is [not] defined" / "is [not] undefined"
+      isDefinedTestP pos = do
+          negated <- option False (try $ keyword "not" >> spacesOrComment >> return True)
+          testName <- (keyword "defined" >> return True) <|> (keyword "undefined" >> return False)
+          -- "is defined" = True, "is undefined" = False
+          -- "is not defined" = False, "is not undefined" = True
+          let wantDefined = if negated then not testName else testName
+          return $ \e -> IsDefinedE pos wantDefined e
+      -- Regular test: "is foo" becomes call to is_foo
+      regularTestP pos = do
+          funcName <- atomicExprP
+          args <- choice [groupP "(" ")" funcArgP
+                        , option [] $ funcArgP >>= (\a -> return [a])]
+          return $ \e -> CallE pos (addIsPrefix funcName) ((Nothing, e):args)
       addIsPrefix :: Expression a -> Expression a
       addIsPrefix expr = case expr of
                            (VarE a text) -> VarE a $ Text.append (Text.pack "is_") text

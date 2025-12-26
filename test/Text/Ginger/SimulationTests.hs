@@ -374,6 +374,12 @@ simulationTests = testGroup "Simulation"
                 mkTestHtml [("myvar", toGVal ("hello" :: Text))] [] "{% if myvar is defined %}yes{% else %}no{% endif %}" "yes"
             , testCase "context var is defined (null)" $ do
                 mkTestHtml [("myvar", def)] [] "{% if myvar is defined %}yes{% else %}no{% endif %}" "no"
+            , testCase "nested x.y.z is defined" $ do
+                mkTestHtml [] [] "{% set x = {'y': {'z': 1}} %}{% if x.y.z is defined %}yes{% else %}no{% endif %}" "yes"
+            , testCase "nested x.y.z is defined (z missing)" $ do
+                mkTestHtml [] [] "{% set x = {'y': {'w': 1}} %}{% if x.y.z is defined %}yes{% else %}no{% endif %}" "no"
+            , testCase "literal null is defined" $ do
+                mkTestHtml [] [] "{% if null is defined %}yes{% else %}no{% endif %}" "yes"
             ]
         , testGroup "\"divisibleby\""
             [ testCase "divisibleby(14,7)" $ do

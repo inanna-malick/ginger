@@ -51,6 +51,19 @@ getVar key = do
             l <- asks contextLookup
             l key
 
+-- | Check if a variable is defined. For local scope variables, this checks
+-- if the key exists in the HashMap (so a variable set to null IS defined).
+-- For context variables, this treats isNull as undefined.
+checkVarDefined :: Monad m => VarName -> Run p m h Bool
+checkVarDefined key = do
+    vars <- gets rsScope
+    case HashMap.lookup key vars of
+        Just _ -> return True  -- In local scope = defined (even if null)
+        Nothing -> do
+            l <- asks contextLookup
+            val <- l key
+            return (not (isNull val))  -- Context: isNull means undefined
+
 clearCapture :: (Monoid h, Monad m) => Run p m h ()
 clearCapture = modify (\s -> s { rsCapture = mempty })
 
