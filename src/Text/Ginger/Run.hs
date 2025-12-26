@@ -222,10 +222,8 @@ defaultScope =
     -- TODO: string (predicate)
     -- TODO: callable
 
-    -- TODO: defined (predicate)
-    -- TODO: undefined (predicate)
-    -- NOTE that @defined@ cannot actually be written as a function. See
-    -- issue #33.
+    -- NOTE: @defined@ and @undefined@ are implemented as special syntax in the
+    -- parser (IsDefinedE), not as regular functions. See issue #33.
 
     -- TODO: lower (predicate)
     -- TODO: upper (predicate)
@@ -578,6 +576,31 @@ runExpression' (TernaryE _ condition yes no) = do
     runExpression expr
 runExpression' (DoE _ stmt) =
     runStatement stmt
+runExpression' (IsDefinedE _ wantDefined expr) = do
+    isDefined <- checkExprDefined expr
+    return $ toGVal (if wantDefined then isDefined else not isDefined)
+
+-- | Check if an expression refers to something that is defined.
+-- For variable expressions, checks if the variable is defined.
+-- For member lookups, checks if the base is defined and the member exists.
+-- For other expressions (literals, function calls, etc.), always returns True.
+checkExprDefined :: ( Monad m
+                    , Monoid h
+                    , ToGVal (Run p m h) h
+                    , ToGVal (Run p m h) p
+                    )
+                 => Expression p
+                 -> Run p m h Bool
+checkExprDefined (VarE _ key) = checkVarDefined key
+checkExprDefined (MemberLookupE _ baseExpr indexExpr) = do
+    baseDefined <- checkExprDefined baseExpr
+    if not baseDefined
+        then return False
+        else do
+            base <- runExpression baseExpr
+            index <- runExpression indexExpr
+            return $ isJust (lookupLoose index base)
+checkExprDefined _ = return True  -- Literals, calls, etc. are always "defined"
 
 -- | Helper function to output a HTML value using whatever print function the
 -- context provides.

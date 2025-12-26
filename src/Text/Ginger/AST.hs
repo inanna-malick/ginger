@@ -91,6 +91,7 @@ data Expression a
     | LambdaE a [Text] (Expression a) -- ^ (foo, bar) -> expr
     | TernaryE a (Expression a) (Expression a) (Expression a) -- ^ expr ? expr : expr
     | DoE a (Statement a) -- ^ do { statement; }
+    | IsDefinedE a Bool (Expression a) -- ^ expr is defined / expr is undefined (Bool = True for defined, False for undefined)
     deriving (Show, Functor)
 
 exprAnnotation (StringLiteralE a _) = a
@@ -105,6 +106,7 @@ exprAnnotation (CallE a _ _) = a
 exprAnnotation (LambdaE a _ _) = a
 exprAnnotation (TernaryE a _ _ _) = a
 exprAnnotation (DoE a _) = a
+exprAnnotation (IsDefinedE a _ _) = a
 
 class Annotated f where
     annotation :: f p -> p

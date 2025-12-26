@@ -345,12 +345,43 @@ simulationTests = testGroup "Simulation"
                 "ab"
         ]
     , testGroup "Built-in tests"
---        TODO implement defined
---          testCase "defined(myvar) [defined]" $ do
---            mkTestHtml [] [] "{% set myvar=0 %}{% if defined(myvar) %}yes{% else %}no{% endif %}" "yes"
---        , testCase "defined(myvar) [notdefined]" $ do
---            mkTestHtml [] [] "{% if defined(myvar) %}yes{% else %}no{% endif %}" "no"
-        [ testGroup "\"divisibleby\""
+        [ testGroup "\"defined\" / \"undefined\""
+            [ testCase "x is defined (set to value)" $ do
+                mkTestHtml [] [] "{% set x = 'hello' %}{% if x is defined %}yes{% else %}no{% endif %}" "yes"
+            , testCase "x is defined (not set)" $ do
+                mkTestHtml [] [] "{% if x is defined %}yes{% else %}no{% endif %}" "no"
+            , testCase "x is defined (set to null)" $ do
+                mkTestHtml [] [] "{% set x = null %}{% if x is defined %}yes{% else %}no{% endif %}" "yes"
+            , testCase "x is undefined (set to value)" $ do
+                mkTestHtml [] [] "{% set x = 'hello' %}{% if x is undefined %}yes{% else %}no{% endif %}" "no"
+            , testCase "x is undefined (not set)" $ do
+                mkTestHtml [] [] "{% if x is undefined %}yes{% else %}no{% endif %}" "yes"
+            , testCase "x is not defined (not set)" $ do
+                mkTestHtml [] [] "{% if x is not defined %}yes{% else %}no{% endif %}" "yes"
+            , testCase "x is not undefined (set to value)" $ do
+                mkTestHtml [] [] "{% set x = 'hello' %}{% if x is not undefined %}yes{% else %}no{% endif %}" "yes"
+            , testCase "x.y is defined (x set, y exists)" $ do
+                mkTestHtml [] [] "{% set x = {'y': 'hello'} %}{% if x.y is defined %}yes{% else %}no{% endif %}" "yes"
+            , testCase "x.y is defined (x set, y missing)" $ do
+                mkTestHtml [] [] "{% set x = {'z': 'hello'} %}{% if x.y is defined %}yes{% else %}no{% endif %}" "no"
+            , testCase "x.y is defined (x not set)" $ do
+                mkTestHtml [] [] "{% if x.y is defined %}yes{% else %}no{% endif %}" "no"
+            , testCase "x['key'] is defined (key exists)" $ do
+                mkTestHtml [] [] "{% set x = {'key': 'value'} %}{% if x['key'] is defined %}yes{% else %}no{% endif %}" "yes"
+            , testCase "x['key'] is defined (key missing)" $ do
+                mkTestHtml [] [] "{% set x = {'other': 'value'} %}{% if x['key'] is defined %}yes{% else %}no{% endif %}" "no"
+            , testCase "context var is defined (non-null)" $ do
+                mkTestHtml [("myvar", toGVal ("hello" :: Text))] [] "{% if myvar is defined %}yes{% else %}no{% endif %}" "yes"
+            , testCase "context var is defined (null)" $ do
+                mkTestHtml [("myvar", def)] [] "{% if myvar is defined %}yes{% else %}no{% endif %}" "no"
+            , testCase "nested x.y.z is defined" $ do
+                mkTestHtml [] [] "{% set x = {'y': {'z': 1}} %}{% if x.y.z is defined %}yes{% else %}no{% endif %}" "yes"
+            , testCase "nested x.y.z is defined (z missing)" $ do
+                mkTestHtml [] [] "{% set x = {'y': {'w': 1}} %}{% if x.y.z is defined %}yes{% else %}no{% endif %}" "no"
+            , testCase "literal null is defined" $ do
+                mkTestHtml [] [] "{% if null is defined %}yes{% else %}no{% endif %}" "yes"
+            ]
+        , testGroup "\"divisibleby\""
             [ testCase "divisibleby(14,7)" $ do
                 mkTestHtml [] []
                     "{% if divisibleby(14,7) %}yes{% else %}no{% endif %}"
