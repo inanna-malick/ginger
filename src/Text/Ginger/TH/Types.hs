@@ -7,6 +7,10 @@ module Text.Ginger.TH.Types
     -- * Access paths extracted from templates
   , AccessPath(..)
   , PathSegment(..)
+    -- * Narrowing context
+  , NarrowedPath(..)
+  , toNarrowedPath
+  , isNarrowedBy
     -- * Validation results
   , ValidationError(..)
     -- * Typed template wrapper
@@ -15,6 +19,8 @@ module Text.Ginger.TH.Types
 
 import Data.Text (Text)
 import Data.Data (Data, Typeable)
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Language.Haskell.TH.Syntax (Lift)
 import Text.Parsec.Pos (SourcePos)
 
@@ -44,7 +50,7 @@ data PathSegment
   | DynamicKey
     -- ^ Dynamic key access: @[expr]@ where expr is not a literal.
     -- This is always a compile error in v1.
-  deriving (Show, Eq, Data, Typeable)
+  deriving (Show, Eq, Ord, Data, Typeable)
 
 -- | A variable access path extracted from a template.
 -- Represents expressions like @{{ user.profile.name }}@.
@@ -55,7 +61,29 @@ data AccessPath = AccessPath
     -- ^ Chain of accesses (e.g., [StaticKey \"profile\", StaticKey \"name\"])
   , apSourcePos :: SourcePos
     -- ^ Source position for error messages
+  , apNarrowed :: Set NarrowedPath
+    -- ^ Paths that have been narrowed (guarded by @is defined@) at this point
   } deriving (Show, Eq, Data, Typeable)
+
+-- | A path that has been narrowed by an @is defined@ check.
+-- Used to track which accesses are guarded and can safely access
+-- sum type fields that only exist in some constructors.
+data NarrowedPath = NarrowedPath
+  { npRoot :: Text
+    -- ^ Top-level variable name
+  , npPath :: [PathSegment]
+    -- ^ Path segments (without source position)
+  } deriving (Show, Eq, Ord, Data, Typeable)
+
+-- | Convert an AccessPath to a NarrowedPath (drops source position and narrowing context).
+toNarrowedPath :: AccessPath -> NarrowedPath
+toNarrowedPath (AccessPath root path _ _) = NarrowedPath root path
+
+-- | Check if an AccessPath is narrowed by one of the paths in the narrowing context.
+-- An access is considered narrowed if its exact path exists in the narrowed set.
+isNarrowedBy :: AccessPath -> Bool
+isNarrowedBy (AccessPath root path _ narrowed) =
+  NarrowedPath root path `Set.member` narrowed
 
 -- | Validation error for a single access path.
 data ValidationError

@@ -34,6 +34,7 @@ thTests = testGroup "Template Haskell Type Checking"
   , extractionTests
   , validationTests
   , schemaGenerationTests
+  , narrowingTests
   , endToEndTests
   , propertyTests
   ]
@@ -185,18 +186,18 @@ validationTests :: TestTree
 validationTests = testGroup "Path Validation"
   [ testCase "valid field on record" $ do
       let schema = RecordSchema [("name", ScalarSchema), ("email", ScalarSchema)]
-      let path = AccessPath "name" [] dummyPos
+      let path = mkAccessPath "name" [] dummyPos
       assertEqual "should be valid" Nothing (validatePath emptyRegistry schema path)
 
   , testCase "valid nested field" $ do
       let profileSchema = RecordSchema [("bio", ScalarSchema)]
       let schema = RecordSchema [("profile", profileSchema)]
-      let path = AccessPath "profile" [StaticKey "bio"] dummyPos
+      let path = mkAccessPath "profile" [StaticKey "bio"] dummyPos
       assertEqual "should be valid" Nothing (validatePath emptyRegistry schema path)
 
   , testCase "invalid field on record" $ do
       let schema = RecordSchema [("name", ScalarSchema)]
-      let path = AccessPath "email" [] dummyPos
+      let path = mkAccessPath "email" [] dummyPos
       case validatePath emptyRegistry schema path of
         Nothing -> assertFailure "should be invalid"
         Just (FieldNotFound _ field) -> assertEqual "field name" "email" field
@@ -204,7 +205,7 @@ validationTests = testGroup "Path Validation"
 
   , testCase "invalid nested field" $ do
       let schema = RecordSchema [("name", ScalarSchema)]
-      let path = AccessPath "name" [StaticKey "foo"] dummyPos
+      let path = mkAccessPath "name" [StaticKey "foo"] dummyPos
       case validatePath emptyRegistry schema path of
         Nothing -> assertFailure "should be invalid (can't access field on scalar)"
         Just (AccessOnScalar _) -> return ()
@@ -213,7 +214,7 @@ validationTests = testGroup "Path Validation"
   , testCase "dynamic key on record is error" $ do
       -- Access user[<dynamic>] where user is a record
       let schema = RecordSchema [("user", RecordSchema [("name", ScalarSchema)])]
-      let path = AccessPath "user" [DynamicKey] dummyPos
+      let path = mkAccessPath "user" [DynamicKey] dummyPos
       case validatePath emptyRegistry schema path of
         Nothing -> assertFailure "should be invalid"
         Just (DynamicAccessNotAllowed _) -> return ()
@@ -224,7 +225,7 @@ validationTests = testGroup "Path Validation"
             [ [("tag", ScalarSchema), ("name", ScalarSchema)]
             , [("tag", ScalarSchema), ("value", ScalarSchema)]
             ]
-      let path = AccessPath "tag" [] dummyPos
+      let path = mkAccessPath "tag" [] dummyPos
       assertEqual "should be valid" Nothing (validatePath emptyRegistry schema path)
 
   , testCase "sum type - field not in all constructors (root)" $ do
@@ -233,7 +234,7 @@ validationTests = testGroup "Path Validation"
             [ [("tag", ScalarSchema), ("name", ScalarSchema)]
             , [("tag", ScalarSchema), ("value", ScalarSchema)]
             ]
-      let path = AccessPath "name" [] dummyPos
+      let path = mkAccessPath "name" [] dummyPos
       case validatePath emptyRegistry schema path of
         Nothing -> assertFailure "should be invalid"
         Just (FieldNotFound _ field) ->
@@ -247,7 +248,7 @@ validationTests = testGroup "Path Validation"
             , [("y", ScalarSchema)]
             ]
       let schema = RecordSchema [("content", innerSum)]
-      let path = AccessPath "content" [StaticKey "x"] dummyPos
+      let path = mkAccessPath "content" [StaticKey "x"] dummyPos
       case validatePath emptyRegistry schema path of
         Nothing -> assertFailure "should be invalid"
         Just (FieldNotInAllConstructors _ field) ->
@@ -256,13 +257,13 @@ validationTests = testGroup "Path Validation"
 
   , testCase "list index access is valid" $ do
       let schema = RecordSchema [("items", ListSchema ScalarSchema)]
-      let path = AccessPath "items" [StaticKey "0"] dummyPos
+      let path = mkAccessPath "items" [StaticKey "0"] dummyPos
       assertEqual "should be valid" Nothing (validatePath emptyRegistry schema path)
 
   , testCase "list with nested record access" $ do
       let itemSchema = RecordSchema [("name", ScalarSchema)]
       let schema = RecordSchema [("items", ListSchema itemSchema)]
-      let path = AccessPath "items" [StaticKey "0", StaticKey "name"] dummyPos
+      let path = mkAccessPath "items" [StaticKey "0", StaticKey "name"] dummyPos
       assertEqual "should be valid" Nothing (validatePath emptyRegistry schema path)
 
   , testCase "recursive type reference is resolved" $ do
@@ -274,7 +275,7 @@ validationTests = testGroup "Path Validation"
             ]
       let registry = Map.singleton "Tree" treeSchema
       -- Access tree.children.0.value should be valid
-      let path = AccessPath "children" [StaticKey "0", StaticKey "value"] dummyPos
+      let path = mkAccessPath "children" [StaticKey "0", StaticKey "value"] dummyPos
       assertEqual "should be valid" Nothing (validatePath registry treeSchema path)
 
   , testCase "recursive type nested access works" $ do
@@ -284,12 +285,12 @@ validationTests = testGroup "Path Validation"
             , ("children", ListSchema (RecursiveRef "Tree"))
             ]
       let registry = Map.singleton "Tree" treeSchema
-      let path = AccessPath "children" [StaticKey "0", StaticKey "children", StaticKey "0", StaticKey "value"] dummyPos
+      let path = mkAccessPath "children" [StaticKey "0", StaticKey "children", StaticKey "0", StaticKey "value"] dummyPos
       assertEqual "should be valid" Nothing (validatePath registry treeSchema path)
 
   , testCase "error formatting includes location" $ do
       let schema = RecordSchema [("name", ScalarSchema)]
-      let path = AccessPath "email" [] (newPos "test.html" 5 10)
+      let path = AccessPath "email" [] (newPos "test.html" 5 10) Set.empty
       case validatePath emptyRegistry schema path of
         Nothing -> assertFailure "should be invalid"
         Just err -> do
@@ -326,6 +327,10 @@ nullResolver _ = return Nothing
 -- | Dummy source position for testing.
 dummyPos :: SourcePos
 dummyPos = newPos "test" 1 1
+
+-- | Create an AccessPath with no narrowing context (for tests).
+mkAccessPath :: Text -> [PathSegment] -> SourcePos -> AccessPath
+mkAccessPath root segs pos = AccessPath root segs pos Set.empty
 
 --------------------------------------------------------------------------------
 -- Schema Generation Tests (using compile-time TH)
@@ -435,7 +440,7 @@ schemaGenerationTests = testGroup "Schema Generation"
           let hasAnimalName = all (any ((== "animalName") . fst)) constructors
           assertBool "animalName should be in all constructors" hasAnimalName
           -- Validate that animalName access is valid
-          let path = AccessPath "animalName" [] dummyPos
+          let path = mkAccessPath "animalName" [] dummyPos
           assertEqual "animalName should be accessible" Nothing $
             validatePath registry schema path
         _ -> assertFailure $ "expected SumSchema, got: " ++ show schema
@@ -451,7 +456,7 @@ schemaGenerationTests = testGroup "Schema Generation"
             Just other -> assertFailure $ "expected ListSchema with RecursiveRef, got: " ++ show other
             Nothing -> assertFailure "missing treeChildren field"
           -- Validate deep access works
-          let path = AccessPath "treeChildren" [StaticKey "0", StaticKey "treeValue"] dummyPos
+          let path = mkAccessPath "treeChildren" [StaticKey "0", StaticKey "treeValue"] dummyPos
           assertEqual "nested access should work" Nothing $
             validatePath registry schema path
         _ -> assertFailure $ "expected RecordSchema, got: " ++ show schema
@@ -503,6 +508,106 @@ schemaGenerationTests = testGroup "Schema Generation"
             Just other -> assertFailure $ "expected ScalarSchema for type synonym, got: " ++ show other
             Nothing -> assertFailure "missing wtsEmail field"
         _ -> assertFailure $ "expected RecordSchema, got: " ++ show schema
+  ]
+
+--------------------------------------------------------------------------------
+-- Narrowing Tests (is defined guards)
+--------------------------------------------------------------------------------
+
+narrowingTests :: TestTree
+narrowingTests = testGroup "Narrowing (is defined guards)"
+  [ testCase "guarded sum type field access" $ do
+      -- {% if ctBody is defined %}{{ ctBody }}{% endif %}
+      -- Should work - ctBody only in TextContent but access is guarded
+      let (schema, registry) = contentTypeSchema
+      paths <- parseAndExtract "{% if ctBody is defined %}{{ ctBody }}{% endif %}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      -- ctBody is extracted only from the body (condition is just a query)
+      let ctBodyPaths = filter (\p -> apRoot p == "ctBody") userPaths
+      assertEqual "should have 1 ctBody path (body only)" 1 (length ctBodyPaths)
+      -- The body access should be narrowed
+      let narrowed = apNarrowed (head ctBodyPaths)
+      assertBool "ctBody should be narrowed" (not $ Set.null narrowed)
+      -- Validation should succeed because the body access is guarded
+      let errors = validatePaths registry schema userPaths
+      assertEqual "should have no errors (guarded access)" [] errors
+
+  , testCase "unguarded sum type field rejected" $ do
+      -- {{ ctBody }} alone (unguarded)
+      let (schema, registry) = contentTypeSchema
+      paths <- parseAndExtract "{{ ctBody }}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      let errors = validatePaths registry schema userPaths
+      assertEqual "should have 1 error" 1 (length errors)
+
+  , testCase "is undefined narrows in else branch" $ do
+      -- {% if x is undefined %}...{% else %}{{ x }}{% endif %}
+      -- x in else branch should be narrowed
+      paths <- parseAndExtract "{% if x is undefined %}no{% else %}{{ x }}{% endif %}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      -- Only the x in the else branch ({{ x }}) is extracted (condition is just a query)
+      let xPaths = filter (\p -> apRoot p == "x") userPaths
+      assertEqual "should have 1 x path (else branch only)" 1 (length xPaths)
+      -- The else branch x should be narrowed (x is undefined -> x is defined in else)
+      let narrowed = apNarrowed (head xPaths)
+      assertBool "x in else branch should be narrowed" (not $ Set.null narrowed)
+
+  , testCase "and narrows both sides" $ do
+      -- {% if a is defined and b is defined %}{{ a }}{{ b }}{% endif %}
+      paths <- parseAndExtract "{% if a is defined and b is defined %}{{ a }}{{ b }}{% endif %}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      -- Only body accesses extracted (a and b from body, not from condition)
+      assertEqual "should have 2 paths (body only)" 2 (length userPaths)
+      -- Both a and b in the body should be narrowed
+      let aPaths = filter (\p -> apRoot p == "a") userPaths
+      let bPaths = filter (\p -> apRoot p == "b") userPaths
+      assertBool "a should be narrowed" (all (not . Set.null . apNarrowed) aPaths)
+      assertBool "b should be narrowed" (all (not . Set.null . apNarrowed) bPaths)
+
+  , testCase "or narrows neither" $ do
+      -- {% if a is defined or b is defined %}{{ a }}{% endif %}
+      -- a in body should NOT be narrowed (could be undefined)
+      paths <- parseAndExtract "{% if a is defined or b is defined %}{{ a }}{% endif %}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      -- Only body access extracted (condition is query, not use)
+      assertEqual "should have 1 path (body only)" 1 (length userPaths)
+      -- The body 'a' should not be narrowed (or is conservative)
+      let narrowed = apNarrowed (head userPaths)
+      assertBool "a should not be narrowed in or condition" (Set.null narrowed)
+
+  , testCase "nested if accumulates narrowing" $ do
+      -- {% if x is defined %}{% if y is defined %}{{ x }}{{ y }}{% endif %}{% endif %}
+      paths <- parseAndExtract "{% if x is defined %}{% if y is defined %}{{ x }}{{ y }}{% endif %}{% endif %}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      -- Only body accesses extracted
+      assertEqual "should have 2 paths (body only)" 2 (length userPaths)
+      -- x and y in innermost block should both be narrowed
+      let xPaths = filter (\p -> apRoot p == "x") userPaths
+      let yPaths = filter (\p -> apRoot p == "y") userPaths
+      assertBool "x should be narrowed in nested block" (all (not . Set.null . apNarrowed) xPaths)
+      assertBool "y should be narrowed in nested block" (all (not . Set.null . apNarrowed) yPaths)
+
+  , testCase "ternary expression narrows" $ do
+      -- {{ x.field is defined ? x.field : "default" }}
+      paths <- parseAndExtract "{{ x.field is defined ? x.field : \"default\" }}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      -- Only true branch access extracted (condition is query)
+      assertEqual "should have 1 path (true branch only)" 1 (length userPaths)
+      -- The true branch x.field should be narrowed
+      let narrowed = apNarrowed (head userPaths)
+      assertBool "x.field in ternary true branch should be narrowed" (not $ Set.null narrowed)
+
+  , testCase "not inverts narrowing" $ do
+      -- {% if not (x is undefined) %}{{ x }}{% endif %}
+      -- same as x is defined
+      paths <- parseAndExtract "{% if not (x is undefined) %}{{ x }}{% endif %}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      -- The body 'x' should be narrowed
+      let xPaths = filter (\p -> apRoot p == "x") userPaths
+      assertBool "should have at least one x path" (not $ null xPaths)
+      -- At least one x should be narrowed (the one in the body)
+      let hasNarrowed = any (not . Set.null . apNarrowed) xPaths
+      assertBool "x should be narrowed (not undefined = defined)" hasNarrowed
   ]
 
 --------------------------------------------------------------------------------
@@ -609,14 +714,14 @@ prop_recordFieldsFindable :: NonEmptyList (Text, Schema) -> Bool
 prop_recordFieldsFindable (NonEmpty fields) =
   let schema = RecordSchema fields
       fieldNames = map fst fields
-      paths = [AccessPath name [] dummyPos | name <- fieldNames]
+      paths = [mkAccessPath name [] dummyPos | name <- fieldNames]
   in all (\p -> validatePath emptyRegistry schema p == Nothing) paths
 
 -- | ScalarSchema rejects any non-empty path segment.
 prop_scalarRejectsSegments :: NonEmptyList PathSegment -> Bool
 prop_scalarRejectsSegments (NonEmpty segs) =
   let schema = RecordSchema [("x", ScalarSchema)]
-      path = AccessPath "x" segs dummyPos
+      path = mkAccessPath "x" segs dummyPos
   in case validatePath emptyRegistry schema path of
        Just (AccessOnScalar _) -> True
        _ -> False
@@ -625,14 +730,14 @@ prop_scalarRejectsSegments (NonEmpty segs) =
 prop_listAcceptsAnyKey :: Text -> Bool
 prop_listAcceptsAnyKey key =
   let schema = RecordSchema [("items", ListSchema ScalarSchema)]
-      path = AccessPath "items" [StaticKey key] dummyPos
+      path = mkAccessPath "items" [StaticKey key] dummyPos
   in validatePath emptyRegistry schema path == Nothing
 
 -- | DynamicKey on a RecordSchema always fails.
 prop_dynamicKeyOnRecordFails :: NonEmptyList (Text, Schema) -> Bool
 prop_dynamicKeyOnRecordFails (NonEmpty fields) =
   let schema = RecordSchema [("rec", RecordSchema fields)]
-      path = AccessPath "rec" [DynamicKey] dummyPos
+      path = mkAccessPath "rec" [DynamicKey] dummyPos
   in case validatePath emptyRegistry schema path of
        Just (DynamicAccessNotAllowed _) -> True
        _ -> False
@@ -692,7 +797,8 @@ instance Arbitrary AccessPath where
     <$> (Text.pack <$> listOf1 (elements ['a'..'z']))
     <*> resize 3 (listOf arbitrary)
     <*> pure dummyPos
+    <*> pure Set.empty
 
-  shrink (AccessPath root segs pos) =
-    [AccessPath root segs' pos | segs' <- shrink segs]
+  shrink (AccessPath root segs pos narrowed) =
+    [AccessPath root segs' pos narrowed | segs' <- shrink segs]
 

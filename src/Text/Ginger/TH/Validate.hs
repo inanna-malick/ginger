@@ -29,16 +29,19 @@ validatePaths registry schema = mapMaybe (validatePath registry schema)
 -- | Validate a single access path against a schema.
 -- Returns Nothing if valid, Just error if invalid.
 validatePath :: SchemaRegistry -> Schema -> AccessPath -> Maybe ValidationError
-validatePath registry schema access@(AccessPath root segments _) =
-  case lookupRoot registry root schema of
-    Nothing -> Just $ FieldNotFound access root
-    Just fieldSchema -> validateSegments registry fieldSchema segments access
+validatePath registry schema access@(AccessPath root segments _ narrowed) =
+  -- Check if the full access path is guarded by an `is defined` check
+  let isGuarded = isNarrowedBy access
+  in case lookupRoot registry root schema isGuarded of
+       Nothing -> Just $ FieldNotFound access root
+       Just fieldSchema -> validateSegments registry fieldSchema segments access
 
 -- | Look up a root variable in the schema.
-lookupRoot :: SchemaRegistry -> Text -> Schema -> Maybe Schema
-lookupRoot registry name schema = case resolveSchema registry schema of
+-- The isGuarded parameter indicates if the access is guarded by `is defined`.
+lookupRoot :: SchemaRegistry -> Text -> Schema -> Bool -> Maybe Schema
+lookupRoot registry name schema isGuarded = case resolveSchema registry schema of
   RecordSchema fields -> lookup name fields
-  SumSchema constructors -> lookupSumField name constructors
+  SumSchema constructors -> lookupSumField name constructors isGuarded
   _ -> Nothing  -- Can't look up in List, Scalar, or unresolved RecursiveRef
 
 -- | Resolve a RecursiveRef to its actual schema.
@@ -49,13 +52,24 @@ resolveSchema registry (RecursiveRef typeName) =
     Nothing -> ScalarSchema  -- Fallback if not found (shouldn't happen)
 resolveSchema _ schema = schema
 
--- | Look up a field in a sum type (must exist in ALL constructors).
-lookupSumField :: Text -> [[(Text, Schema)]] -> Maybe Schema
-lookupSumField fieldName constructors =
+-- | Look up a field in a sum type.
+-- If not guarded: field must exist in ALL constructors.
+-- If guarded (by @is defined@): field must exist in at least one constructor.
+lookupSumField :: Text -> [[(Text, Schema)]] -> Bool -> Maybe Schema
+lookupSumField fieldName constructors isGuarded =
   let lookups = map (lookup fieldName) constructors
-  in if all isJust lookups && allSame (mapMaybe id lookups)
-     then head lookups
-     else Nothing
+      presentIn = mapMaybe id lookups
+  in if null presentIn
+     then Nothing  -- Field doesn't exist in any constructor
+     else if isGuarded
+       -- Guarded: OK if exists in at least one constructor with consistent schema
+       then if allSame presentIn
+            then Just (head presentIn)
+            else Nothing  -- Schema mismatch across constructors
+       -- Not guarded: must exist in ALL constructors
+       else if all isJust lookups && allSame presentIn
+            then Just (head presentIn)
+            else Nothing
   where
     isJust (Just _) = True
     isJust Nothing = False
@@ -78,8 +92,10 @@ validateSegments :: SchemaRegistry -> Schema -> [PathSegment] -> AccessPath -> M
 validateSegments _ _ [] _ = Nothing  -- Reached end of path, valid
 
 validateSegments registry schema (seg:rest) access =
+  -- Check if the full access path is guarded
+  let isGuarded = isNarrowedBy access
   -- First resolve any RecursiveRef
-  case (resolveSchema registry schema, seg) of
+  in case (resolveSchema registry schema, seg) of
     -- Record with static key access
     (RecordSchema fields, StaticKey key) ->
       case lookup key fields of
@@ -92,7 +108,7 @@ validateSegments registry schema (seg:rest) access =
 
     -- Sum type with static key access
     (SumSchema constructors, StaticKey key) ->
-      case lookupSumField key constructors of
+      case lookupSumField key constructors isGuarded of
         Nothing -> Just $ FieldNotInAllConstructors access key
         Just fieldSchema -> validateSegments registry fieldSchema rest access
 
@@ -152,7 +168,7 @@ formatValidationErrors errors =
 
 -- | Format an access path for error messages.
 formatAccessPath :: AccessPath -> String
-formatAccessPath (AccessPath root segments _) =
+formatAccessPath (AccessPath root segments _ _) =
   Text.unpack root ++ concatMap formatSegment segments
   where
     formatSegment (StaticKey k) = "." ++ Text.unpack k

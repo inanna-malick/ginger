@@ -2,6 +2,7 @@
 -- | Extract variable access paths from ginger template AST.
 -- Performs scope-aware traversal to distinguish free variables
 -- (that must come from context) from locally bound variables.
+-- Also tracks narrowing context from @is defined@ guards.
 module Text.Ginger.TH.Extract
   ( extractVariableAccesses
   , extractFromTemplate
@@ -16,10 +17,13 @@ import Data.Maybe (catMaybes, maybeToList)
 import Text.Parsec.Pos (SourcePos)
 
 import Text.Ginger.AST
-import Text.Ginger.TH.Types (AccessPath(..), PathSegment(..))
+import Text.Ginger.TH.Types (AccessPath(..), PathSegment(..), NarrowedPath(..))
 
 -- | Local scope: set of variable names that are bound locally.
 type LocalScope = Set Text
+
+-- | Set of paths that have been narrowed (guarded by @is defined@).
+type NarrowedPaths = Set NarrowedPath
 
 -- | Extract all variable access paths from a template.
 -- Returns paths for free variables only (not locally bound ones).
@@ -28,77 +32,82 @@ extractFromTemplate tpl = extractVariableAccesses (templateBody tpl)
 
 -- | Extract variable accesses from a statement.
 extractVariableAccesses :: Statement SourcePos -> [AccessPath]
-extractVariableAccesses stmt = execWriter (walkStatement Set.empty stmt)
+extractVariableAccesses stmt = execWriter (walkStatement Set.empty Set.empty stmt)
 
 -- | Walk a statement, collecting access paths.
 -- The scope parameter tracks locally bound variables.
+-- The narrowed parameter tracks paths guarded by @is defined@.
 -- Returns the updated scope (for sequential binding via SetVarS).
-walkStatement :: LocalScope -> Statement SourcePos -> Writer [AccessPath] LocalScope
-walkStatement scope stmt = case stmt of
+walkStatement :: LocalScope -> NarrowedPaths -> Statement SourcePos -> Writer [AccessPath] LocalScope
+walkStatement scope narrowed stmt = case stmt of
   MultiS _ stmts ->
     -- Process statements sequentially, threading scope through
     -- so that SetVarS bindings are visible to subsequent statements
-    foldM walkStatement scope stmts
+    foldM (\s st -> walkStatement s narrowed st) scope stmts
 
   ScopedS _ body -> do
     -- ScopedS creates isolated scope - bindings don't escape
-    _ <- walkStatement scope body
+    _ <- walkStatement scope narrowed body
     return scope
 
   IndentS _ expr body -> do
-    walkExpression scope expr
-    walkStatement scope body
+    walkExpression scope narrowed expr
+    walkStatement scope narrowed body
 
   LiteralS _ _ ->
     return scope
 
   InterpolationS _ expr -> do
-    walkExpression scope expr
+    walkExpression scope narrowed expr
     return scope
 
   ExpressionS _ expr -> do
-    walkExpression scope expr
+    walkExpression scope narrowed expr
     return scope
 
   IfS _ cond trueBranch falseBranch -> do
-    walkExpression scope cond
-    -- Both branches see the same scope; bindings don't escape branches
-    _ <- walkStatement scope trueBranch
-    _ <- walkStatement scope falseBranch
+    walkExpression scope narrowed cond
+    -- Extract narrowing from the condition
+    let trueNarrowed = narrowed `Set.union` extractNarrowing cond
+    let falseNarrowed = narrowed `Set.union` extractNarrowingForFalse cond
+    -- Branches see narrowed paths; bindings don't escape
+    _ <- walkStatement scope trueNarrowed trueBranch
+    _ <- walkStatement scope falseNarrowed falseBranch
     return scope
 
   SwitchS _ expr cases defaultCase -> do
-    walkExpression scope expr
+    walkExpression scope narrowed expr
     mapM_ (\(caseExpr, caseBody) -> do
-      walkExpression scope caseExpr
-      walkStatement scope caseBody) cases
-    _ <- walkStatement scope defaultCase
+      walkExpression scope narrowed caseExpr
+      walkStatement scope narrowed caseBody) cases
+    _ <- walkStatement scope narrowed defaultCase
     return scope
 
   ForS _ mIndex varName iterExpr body -> do
     -- The iterable expression is evaluated in outer scope
-    walkExpression scope iterExpr
+    walkExpression scope narrowed iterExpr
     -- For loop binds: index (optional), value, and implicit "loop"
     let scope' = scope
           `Set.union` Set.singleton varName
           `Set.union` maybe Set.empty Set.singleton mIndex
           `Set.union` Set.singleton "loop"
-    -- Bindings inside loop body don't escape the loop
-    _ <- walkStatement scope' body
+    -- Narrowing from outside applies inside loop
+    _ <- walkStatement scope' narrowed body
     return scope
 
   SetVarS _ varName expr -> do
     -- RHS is evaluated in current scope (before binding)
-    walkExpression scope expr
+    walkExpression scope narrowed expr
     -- Return scope with the new binding for subsequent statements
     return $ Set.insert varName scope
 
   DefMacroS _ macroName (Macro argNames body) -> do
     -- Macro body has its own scope with just the arguments
+    -- Narrowing context does NOT cross into macro body (isolated)
     let macroScope = Set.fromList argNames
           `Set.union` Set.singleton "varargs"
           `Set.union` Set.singleton "kwargs"
-    _ <- walkStatement macroScope body
+    _ <- walkStatement macroScope Set.empty body
     -- The macro name is now available in scope
     return $ Set.insert macroName scope
 
@@ -106,30 +115,30 @@ walkStatement scope stmt = case stmt of
     return scope
 
   PreprocessedIncludeS _ includedTpl -> do
-    -- Included templates share scope and can add bindings
-    walkStatement scope (templateBody includedTpl)
+    -- Included templates share scope and narrowing context
+    walkStatement scope narrowed (templateBody includedTpl)
 
   NullS _ ->
     return scope
 
   TryCatchS _ tryBody catches finallyBody -> do
     -- Bindings in try/catch/finally don't escape
-    _ <- walkStatement scope tryBody
-    mapM_ (walkCatch scope) catches
-    _ <- walkStatement scope finallyBody
+    _ <- walkStatement scope narrowed tryBody
+    mapM_ (walkCatch scope narrowed) catches
+    _ <- walkStatement scope narrowed finallyBody
     return scope
 
 -- | Walk a catch block.
-walkCatch :: LocalScope -> CatchBlock SourcePos -> Writer [AccessPath] ()
-walkCatch scope (Catch _ captureVar body) = do
+walkCatch :: LocalScope -> NarrowedPaths -> CatchBlock SourcePos -> Writer [AccessPath] ()
+walkCatch scope narrowed (Catch _ captureVar body) = do
   -- Catch block may bind the exception variable
   let scope' = scope `Set.union` maybe Set.empty Set.singleton captureVar
-  _ <- walkStatement scope' body
+  _ <- walkStatement scope' narrowed body
   return ()
 
 -- | Walk an expression, collecting access paths.
-walkExpression :: LocalScope -> Expression SourcePos -> Writer [AccessPath] ()
-walkExpression scope expr = case expr of
+walkExpression :: LocalScope -> NarrowedPaths -> Expression SourcePos -> Writer [AccessPath] ()
+walkExpression scope narrowed expr = case expr of
   StringLiteralE _ _ -> return ()
   NumberLiteralE _ _ -> return ()
   BoolLiteralE _ _ -> return ()
@@ -137,45 +146,55 @@ walkExpression scope expr = case expr of
 
   VarE pos varName
     | varName `Set.member` scope -> return ()  -- Locally bound
-    | otherwise -> tell [AccessPath varName [] pos]  -- Free variable
+    | otherwise -> tell [AccessPath varName [] pos narrowed]  -- Free variable
 
   ListE _ exprs ->
-    mapM_ (walkExpression scope) exprs
+    mapM_ (walkExpression scope narrowed) exprs
 
   ObjectE _ pairs ->
-    mapM_ (\(k, v) -> walkExpression scope k >> walkExpression scope v) pairs
+    mapM_ (\(k, v) -> walkExpression scope narrowed k >> walkExpression scope narrowed v) pairs
 
-  MemberLookupE pos _ _ ->
+  MemberLookupE _ _ _ ->
     -- Try to collect the full access path
     case collectAccessPath expr of
       Just (rootVar, segments, rootPos)
         | rootVar `Set.notMember` scope ->
-            tell [AccessPath rootVar segments rootPos]
+            tell [AccessPath rootVar segments rootPos narrowed]
         | otherwise ->
             -- Root is locally bound, but we should still walk
             -- for any dynamic key expressions
-            walkMemberChainForDynamicKeys scope expr
+            walkMemberChainForDynamicKeys scope narrowed expr
       Nothing ->
         -- Complex base expression, walk recursively
-        walkMemberChainRecursive scope expr
+        walkMemberChainRecursive scope narrowed expr
 
   CallE _ funcExpr args -> do
-    walkExpression scope funcExpr
-    mapM_ (walkExpression scope . snd) args
+    walkExpression scope narrowed funcExpr
+    mapM_ (walkExpression scope narrowed . snd) args
 
   LambdaE _ argNames body -> do
     -- Lambda params are bound in body
     let scope' = scope `Set.union` Set.fromList argNames
-    walkExpression scope' body
+    walkExpression scope' narrowed body
 
   TernaryE _ cond true false -> do
-    walkExpression scope cond
-    walkExpression scope true
-    walkExpression scope false
+    -- Similar to IfS, but for expressions
+    walkExpression scope narrowed cond
+    let trueNarrowed = narrowed `Set.union` extractNarrowing cond
+    let falseNarrowed = narrowed `Set.union` extractNarrowingForFalse cond
+    walkExpression scope trueNarrowed true
+    walkExpression scope falseNarrowed false
 
   DoE _ stmt -> do
     -- Do expressions contain statements; bindings don't escape
-    _ <- walkStatement scope stmt
+    _ <- walkStatement scope narrowed stmt
+    return ()
+
+  IsDefinedE _ _isDefined _innerExpr ->
+    -- Don't extract paths from inside IsDefinedE.
+    -- The inner expression is just being queried for existence, not accessed.
+    -- e.g., `x.field is defined` checks if field exists, doesn't use its value.
+    -- The runtime's checkExprDefined doesn't evaluate the expression.
     return ()
 
 -- | Try to collect a chain of member lookups into a single AccessPath.
@@ -194,20 +213,84 @@ collectAccessPath expr = go expr []
     toSegment _ = Just DynamicKey  -- Any non-literal is dynamic
 
 -- | Walk a member lookup chain recursively when we can't collect it as a path.
-walkMemberChainRecursive :: LocalScope -> Expression SourcePos -> Writer [AccessPath] ()
-walkMemberChainRecursive scope (MemberLookupE _ baseExpr keyExpr) = do
-  walkExpression scope baseExpr
-  walkExpression scope keyExpr
-walkMemberChainRecursive scope expr =
-  walkExpression scope expr
+walkMemberChainRecursive :: LocalScope -> NarrowedPaths -> Expression SourcePos -> Writer [AccessPath] ()
+walkMemberChainRecursive scope narrowed (MemberLookupE _ baseExpr keyExpr) = do
+  walkExpression scope narrowed baseExpr
+  walkExpression scope narrowed keyExpr
+walkMemberChainRecursive scope narrowed expr =
+  walkExpression scope narrowed expr
 
 -- | Walk member chain looking for dynamic key expressions to traverse.
-walkMemberChainForDynamicKeys :: LocalScope -> Expression SourcePos -> Writer [AccessPath] ()
-walkMemberChainForDynamicKeys scope (MemberLookupE _ baseExpr keyExpr) = do
-  walkMemberChainForDynamicKeys scope baseExpr
+walkMemberChainForDynamicKeys :: LocalScope -> NarrowedPaths -> Expression SourcePos -> Writer [AccessPath] ()
+walkMemberChainForDynamicKeys scope narrowed (MemberLookupE _ baseExpr keyExpr) = do
+  walkMemberChainForDynamicKeys scope narrowed baseExpr
   -- Walk the key expression if it's not a literal
   case keyExpr of
     StringLiteralE _ _ -> return ()
-    _ -> walkExpression scope keyExpr
-walkMemberChainForDynamicKeys _ (VarE _ _) = return ()
-walkMemberChainForDynamicKeys scope expr = walkExpression scope expr
+    _ -> walkExpression scope narrowed keyExpr
+walkMemberChainForDynamicKeys _ _ (VarE _ _) = return ()
+walkMemberChainForDynamicKeys scope narrowed expr = walkExpression scope narrowed expr
+
+-- | Extract paths that are narrowed (guarded) by an @is defined@ condition.
+-- Returns paths that are known to be defined in the true branch.
+--
+-- Note: Boolean operators are represented as CallE in ginger's AST:
+--   - "and" / "&&" -> CallE (VarE "all") [left, right]
+--   - "or" / "||"  -> CallE (VarE "any") [left, right]
+--   - "not"        -> CallE (VarE "not") [inner]
+extractNarrowing :: Expression SourcePos -> NarrowedPaths
+extractNarrowing expr = case expr of
+  IsDefinedE _ True inner ->
+    -- "x is defined" narrows x in trueBranch
+    case collectAccessPath inner of
+      Just (root, segments, _) -> Set.singleton (NarrowedPath root segments)
+      Nothing -> Set.empty
+
+  IsDefinedE _ False _ ->
+    -- "x is undefined" narrows nothing in trueBranch
+    Set.empty
+
+  -- "not expr" = swap true/false narrowing
+  CallE _ (VarE _ funcName) [(_, inner)]
+    | funcName == "not" -> extractNarrowingForFalse inner
+
+  -- "a and b" narrows both in trueBranch
+  CallE _ (VarE _ funcName) args
+    | funcName == "all" ->
+        Set.unions $ map (extractNarrowing . snd) args
+
+  -- "a or b" narrows nothing (conservative)
+  CallE _ (VarE _ funcName) _
+    | funcName == "any" -> Set.empty
+
+  _ -> Set.empty
+
+-- | Extract paths that are narrowed in the false branch of a condition.
+extractNarrowingForFalse :: Expression SourcePos -> NarrowedPaths
+extractNarrowingForFalse expr = case expr of
+  IsDefinedE _ True _ ->
+    -- "x is defined" narrows nothing in falseBranch
+    Set.empty
+
+  IsDefinedE _ False inner ->
+    -- "x is undefined" narrows x in falseBranch
+    case collectAccessPath inner of
+      Just (root, segments, _) -> Set.singleton (NarrowedPath root segments)
+      Nothing -> Set.empty
+
+  -- "not expr" = swap true/false narrowing
+  CallE _ (VarE _ funcName) [(_, inner)]
+    | funcName == "not" -> extractNarrowing inner
+
+  -- "a and b" -> falseBranch means at least one is false
+  -- Conservative: don't narrow anything
+  CallE _ (VarE _ funcName) _
+    | funcName == "all" -> Set.empty
+
+  -- "a or b" -> falseBranch means both are false
+  -- Both are narrowed in falseBranch
+  CallE _ (VarE _ funcName) args
+    | funcName == "any" ->
+        Set.unions $ map (extractNarrowingForFalse . snd) args
+
+  _ -> Set.empty
