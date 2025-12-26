@@ -5,9 +5,12 @@ module Text.Ginger.TH.Validate
   , validatePaths
   , formatValidationError
   , formatValidationErrors
+  , SchemaRegistry
   ) where
 
 import Data.List (find)
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -15,23 +18,36 @@ import Text.Parsec.Pos (SourcePos, sourceName, sourceLine, sourceColumn)
 
 import Text.Ginger.TH.Types
 
+-- | Registry mapping type names to their schemas.
+-- Used to resolve RecursiveRef during validation.
+type SchemaRegistry = Map Text Schema
+
 -- | Validate multiple access paths against a schema.
-validatePaths :: Schema -> [AccessPath] -> [ValidationError]
-validatePaths schema = mapMaybe (validatePath schema)
+validatePaths :: SchemaRegistry -> Schema -> [AccessPath] -> [ValidationError]
+validatePaths registry schema = mapMaybe (validatePath registry schema)
 
 -- | Validate a single access path against a schema.
 -- Returns Nothing if valid, Just error if invalid.
-validatePath :: Schema -> AccessPath -> Maybe ValidationError
-validatePath schema access@(AccessPath root segments _) =
-  case lookupRoot root schema of
+validatePath :: SchemaRegistry -> Schema -> AccessPath -> Maybe ValidationError
+validatePath registry schema access@(AccessPath root segments _) =
+  case lookupRoot registry root schema of
     Nothing -> Just $ FieldNotFound access root
-    Just fieldSchema -> validateSegments fieldSchema segments access
+    Just fieldSchema -> validateSegments registry fieldSchema segments access
 
 -- | Look up a root variable in the schema.
-lookupRoot :: Text -> Schema -> Maybe Schema
-lookupRoot name (RecordSchema fields) = lookup name fields
-lookupRoot name (SumSchema constructors) = lookupSumField name constructors
-lookupRoot _ _ = Nothing  -- Can't look up in List or Scalar
+lookupRoot :: SchemaRegistry -> Text -> Schema -> Maybe Schema
+lookupRoot registry name schema = case resolveSchema registry schema of
+  RecordSchema fields -> lookup name fields
+  SumSchema constructors -> lookupSumField name constructors
+  _ -> Nothing  -- Can't look up in List, Scalar, or unresolved RecursiveRef
+
+-- | Resolve a RecursiveRef to its actual schema.
+resolveSchema :: SchemaRegistry -> Schema -> Schema
+resolveSchema registry (RecursiveRef typeName) =
+  case Map.lookup typeName registry of
+    Just s -> s
+    Nothing -> ScalarSchema  -- Fallback if not found (shouldn't happen)
+resolveSchema _ schema = schema
 
 -- | Look up a field in a sum type (must exist in ALL constructors).
 lookupSumField :: Text -> [[(Text, Schema)]] -> Maybe Schema
@@ -58,37 +74,43 @@ lookupSumField fieldName constructors =
     schemaEq _ _ = False
 
 -- | Validate path segments against a schema.
-validateSegments :: Schema -> [PathSegment] -> AccessPath -> Maybe ValidationError
-validateSegments _ [] _ = Nothing  -- Reached end of path, valid
+validateSegments :: SchemaRegistry -> Schema -> [PathSegment] -> AccessPath -> Maybe ValidationError
+validateSegments _ _ [] _ = Nothing  -- Reached end of path, valid
 
-validateSegments schema (seg:rest) access = case (schema, seg) of
-  -- Record with static key access
-  (RecordSchema fields, StaticKey key) ->
-    case lookup key fields of
-      Nothing -> Just $ FieldNotFound access key
-      Just fieldSchema -> validateSegments fieldSchema rest access
+validateSegments registry schema (seg:rest) access =
+  -- First resolve any RecursiveRef
+  case (resolveSchema registry schema, seg) of
+    -- Record with static key access
+    (RecordSchema fields, StaticKey key) ->
+      case lookup key fields of
+        Nothing -> Just $ FieldNotFound access key
+        Just fieldSchema -> validateSegments registry fieldSchema rest access
 
-  -- Record with dynamic key access - NOT ALLOWED
-  (RecordSchema _, DynamicKey) ->
-    Just $ DynamicAccessNotAllowed access
+    -- Record with dynamic key access - NOT ALLOWED
+    (RecordSchema _, DynamicKey) ->
+      Just $ DynamicAccessNotAllowed access
 
-  -- Sum type with static key access
-  (SumSchema constructors, StaticKey key) ->
-    case lookupSumField key constructors of
-      Nothing -> Just $ FieldNotInAllConstructors access key
-      Just fieldSchema -> validateSegments fieldSchema rest access
+    -- Sum type with static key access
+    (SumSchema constructors, StaticKey key) ->
+      case lookupSumField key constructors of
+        Nothing -> Just $ FieldNotInAllConstructors access key
+        Just fieldSchema -> validateSegments registry fieldSchema rest access
 
-  -- Sum type with dynamic key access - NOT ALLOWED
-  (SumSchema _, DynamicKey) ->
-    Just $ DynamicAccessNotAllowed access
+    -- Sum type with dynamic key access - NOT ALLOWED
+    (SumSchema _, DynamicKey) ->
+      Just $ DynamicAccessNotAllowed access
 
-  -- List with any key access (index)
-  (ListSchema elemSchema, _) ->
-    validateSegments elemSchema rest access
+    -- List with any key access (index)
+    (ListSchema elemSchema, _) ->
+      validateSegments registry elemSchema rest access
 
-  -- Scalar with any key access - NOT ALLOWED
-  (ScalarSchema, _) ->
-    Just $ AccessOnScalar access
+    -- Scalar with any key access - NOT ALLOWED
+    (ScalarSchema, _) ->
+      Just $ AccessOnScalar access
+
+    -- RecursiveRef that couldn't be resolved (shouldn't happen)
+    (RecursiveRef _, _) ->
+      Just $ UnknownType access "unresolved recursive reference"
 
 -- | Format a single validation error as a string.
 formatValidationError :: ValidationError -> String

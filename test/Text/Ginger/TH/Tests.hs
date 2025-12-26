@@ -12,6 +12,7 @@ import Test.Tasty.QuickCheck
 
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Text.Parsec.Pos (newPos, SourcePos)
 
@@ -20,7 +21,7 @@ import Text.Ginger.Parse (parseGinger', mkParserOptions, ParserOptions(..))
 import Text.Ginger.TH.Types
 import Text.Ginger.TH.Builtins (isBuiltin, builtinNames)
 import Text.Ginger.TH.Extract (extractFromTemplate, extractVariableAccesses)
-import Text.Ginger.TH.Validate (validatePath, validatePaths, formatValidationError)
+import Text.Ginger.TH.Validate (validatePath, validatePaths, formatValidationError, SchemaRegistry)
 
 -- | All TH-related tests
 thTests :: TestTree
@@ -104,13 +105,28 @@ extractionTests = testGroup "Variable Extraction"
       assertEqual "should extract one path (items)" 1 (length userPaths)
 
   , testCase "set binds variable in subsequent statements" $ do
-      -- Note: our extraction is simplified and may not perfectly handle
-      -- sequential scoping of set. This test documents current behavior.
+      -- 'value' is free, 'x' is bound by set and available in subsequent statements
       paths <- parseAndExtract "{% set x = value %}{{ x }}"
       let userPaths = filter (not . isBuiltin . apRoot) paths
-      -- 'value' is definitely free, 'x' behavior depends on implementation
-      assertBool "should extract 'value'" $
-        any (\p -> apRoot p == "value") userPaths
+      -- Only 'value' should be extracted, 'x' is bound
+      assertEqual "should extract only 'value'" 1 (length userPaths)
+      assertEqual "should extract 'value'" "value" (apRoot $ head userPaths)
+
+  , testCase "set binds variable for nested access" $ do
+      -- Verify set binding works for nested access too
+      paths <- parseAndExtract "{% set user = data %}{{ user.name }}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      -- Only 'data' should be extracted, 'user.name' is bound
+      assertEqual "should extract only 'data'" 1 (length userPaths)
+      assertEqual "should extract 'data'" "data" (apRoot $ head userPaths)
+
+  , testCase "set variable used before definition is free" $ do
+      -- If a variable is used before set, it's still free at that point
+      paths <- parseAndExtract "{{ x }}{% set x = 1 %}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      -- 'x' used before set should be extracted
+      assertEqual "should extract 'x'" 1 (length userPaths)
+      assertEqual "should be 'x'" "x" (apRoot $ head userPaths)
 
   , testCase "lambda binds parameters" $ do
       paths <- parseAndExtract "{{ items | map((x) -> x.name) }}"
@@ -155,23 +171,27 @@ extractionTests = testGroup "Variable Extraction"
 -- Validation Tests
 --------------------------------------------------------------------------------
 
+-- | Empty registry for simple tests
+emptyRegistry :: SchemaRegistry
+emptyRegistry = Map.empty
+
 validationTests :: TestTree
 validationTests = testGroup "Path Validation"
   [ testCase "valid field on record" $ do
       let schema = RecordSchema [("name", ScalarSchema), ("email", ScalarSchema)]
       let path = AccessPath "name" [] dummyPos
-      assertEqual "should be valid" Nothing (validatePath schema path)
+      assertEqual "should be valid" Nothing (validatePath emptyRegistry schema path)
 
   , testCase "valid nested field" $ do
       let profileSchema = RecordSchema [("bio", ScalarSchema)]
       let schema = RecordSchema [("profile", profileSchema)]
       let path = AccessPath "profile" [StaticKey "bio"] dummyPos
-      assertEqual "should be valid" Nothing (validatePath schema path)
+      assertEqual "should be valid" Nothing (validatePath emptyRegistry schema path)
 
   , testCase "invalid field on record" $ do
       let schema = RecordSchema [("name", ScalarSchema)]
       let path = AccessPath "email" [] dummyPos
-      case validatePath schema path of
+      case validatePath emptyRegistry schema path of
         Nothing -> assertFailure "should be invalid"
         Just (FieldNotFound _ field) -> assertEqual "field name" "email" field
         Just other -> assertFailure $ "wrong error type: " ++ show other
@@ -179,7 +199,7 @@ validationTests = testGroup "Path Validation"
   , testCase "invalid nested field" $ do
       let schema = RecordSchema [("name", ScalarSchema)]
       let path = AccessPath "name" [StaticKey "foo"] dummyPos
-      case validatePath schema path of
+      case validatePath emptyRegistry schema path of
         Nothing -> assertFailure "should be invalid (can't access field on scalar)"
         Just (AccessOnScalar _) -> return ()
         Just other -> assertFailure $ "wrong error type: " ++ show other
@@ -188,7 +208,7 @@ validationTests = testGroup "Path Validation"
       -- Access user[<dynamic>] where user is a record
       let schema = RecordSchema [("user", RecordSchema [("name", ScalarSchema)])]
       let path = AccessPath "user" [DynamicKey] dummyPos
-      case validatePath schema path of
+      case validatePath emptyRegistry schema path of
         Nothing -> assertFailure "should be invalid"
         Just (DynamicAccessNotAllowed _) -> return ()
         Just other -> assertFailure $ "wrong error type: " ++ show other
@@ -199,7 +219,7 @@ validationTests = testGroup "Path Validation"
             , [("tag", ScalarSchema), ("value", ScalarSchema)]
             ]
       let path = AccessPath "tag" [] dummyPos
-      assertEqual "should be valid" Nothing (validatePath schema path)
+      assertEqual "should be valid" Nothing (validatePath emptyRegistry schema path)
 
   , testCase "sum type - field not in all constructors (root)" $ do
       -- At root level, missing field in some constructors returns FieldNotFound
@@ -208,7 +228,7 @@ validationTests = testGroup "Path Validation"
             , [("tag", ScalarSchema), ("value", ScalarSchema)]
             ]
       let path = AccessPath "name" [] dummyPos
-      case validatePath schema path of
+      case validatePath emptyRegistry schema path of
         Nothing -> assertFailure "should be invalid"
         Just (FieldNotFound _ field) ->
           assertEqual "field name" "name" field
@@ -222,7 +242,7 @@ validationTests = testGroup "Path Validation"
             ]
       let schema = RecordSchema [("content", innerSum)]
       let path = AccessPath "content" [StaticKey "x"] dummyPos
-      case validatePath schema path of
+      case validatePath emptyRegistry schema path of
         Nothing -> assertFailure "should be invalid"
         Just (FieldNotInAllConstructors _ field) ->
           assertEqual "field name" "x" field
@@ -231,18 +251,40 @@ validationTests = testGroup "Path Validation"
   , testCase "list index access is valid" $ do
       let schema = RecordSchema [("items", ListSchema ScalarSchema)]
       let path = AccessPath "items" [StaticKey "0"] dummyPos
-      assertEqual "should be valid" Nothing (validatePath schema path)
+      assertEqual "should be valid" Nothing (validatePath emptyRegistry schema path)
 
   , testCase "list with nested record access" $ do
       let itemSchema = RecordSchema [("name", ScalarSchema)]
       let schema = RecordSchema [("items", ListSchema itemSchema)]
       let path = AccessPath "items" [StaticKey "0", StaticKey "name"] dummyPos
-      assertEqual "should be valid" Nothing (validatePath schema path)
+      assertEqual "should be valid" Nothing (validatePath emptyRegistry schema path)
+
+  , testCase "recursive type reference is resolved" $ do
+      -- Simulate a recursive type: Tree = Node { value :: Int, children :: [Tree] }
+      -- The RecursiveRef "Tree" should resolve to the Tree schema
+      let treeSchema = RecordSchema
+            [ ("value", ScalarSchema)
+            , ("children", ListSchema (RecursiveRef "Tree"))
+            ]
+      let registry = Map.singleton "Tree" treeSchema
+      -- Access tree.children.0.value should be valid
+      let path = AccessPath "children" [StaticKey "0", StaticKey "value"] dummyPos
+      assertEqual "should be valid" Nothing (validatePath registry treeSchema path)
+
+  , testCase "recursive type nested access works" $ do
+      -- Access tree.children.0.children.0.value (two levels deep)
+      let treeSchema = RecordSchema
+            [ ("value", ScalarSchema)
+            , ("children", ListSchema (RecursiveRef "Tree"))
+            ]
+      let registry = Map.singleton "Tree" treeSchema
+      let path = AccessPath "children" [StaticKey "0", StaticKey "children", StaticKey "0", StaticKey "value"] dummyPos
+      assertEqual "should be valid" Nothing (validatePath registry treeSchema path)
 
   , testCase "error formatting includes location" $ do
       let schema = RecordSchema [("name", ScalarSchema)]
       let path = AccessPath "email" [] (newPos "test.html" 5 10)
-      case validatePath schema path of
+      case validatePath emptyRegistry schema path of
         Nothing -> assertFailure "should be invalid"
         Just err -> do
           let formatted = formatValidationError err
@@ -304,14 +346,14 @@ prop_recordFieldsFindable (NonEmpty fields) =
   let schema = RecordSchema fields
       fieldNames = map fst fields
       paths = [AccessPath name [] dummyPos | name <- fieldNames]
-  in all (\p -> validatePath schema p == Nothing) paths
+  in all (\p -> validatePath emptyRegistry schema p == Nothing) paths
 
 -- | ScalarSchema rejects any non-empty path segment.
 prop_scalarRejectsSegments :: NonEmptyList PathSegment -> Bool
 prop_scalarRejectsSegments (NonEmpty segs) =
   let schema = RecordSchema [("x", ScalarSchema)]
       path = AccessPath "x" segs dummyPos
-  in case validatePath schema path of
+  in case validatePath emptyRegistry schema path of
        Just (AccessOnScalar _) -> True
        _ -> False
 
@@ -320,21 +362,21 @@ prop_listAcceptsAnyKey :: Text -> Bool
 prop_listAcceptsAnyKey key =
   let schema = RecordSchema [("items", ListSchema ScalarSchema)]
       path = AccessPath "items" [StaticKey key] dummyPos
-  in validatePath schema path == Nothing
+  in validatePath emptyRegistry schema path == Nothing
 
 -- | DynamicKey on a RecordSchema always fails.
 prop_dynamicKeyOnRecordFails :: NonEmptyList (Text, Schema) -> Bool
 prop_dynamicKeyOnRecordFails (NonEmpty fields) =
   let schema = RecordSchema [("rec", RecordSchema fields)]
       path = AccessPath "rec" [DynamicKey] dummyPos
-  in case validatePath schema path of
+  in case validatePath emptyRegistry schema path of
        Just (DynamicAccessNotAllowed _) -> True
        _ -> False
 
 -- | Validation of the same path against same schema is deterministic.
 prop_validationDeterministic :: Schema -> AccessPath -> Bool
 prop_validationDeterministic schema path =
-  validatePath schema path == validatePath schema path
+  validatePath emptyRegistry schema path == validatePath emptyRegistry schema path
 
 -- | Filtering builtins twice gives same result as once.
 prop_builtinFilterIdempotent :: [Text] -> Bool

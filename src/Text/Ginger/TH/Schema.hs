@@ -3,6 +3,7 @@
 -- | Generate Schema from Haskell types via Template Haskell reification.
 module Text.Ginger.TH.Schema
   ( generateSchema
+  , SchemaRegistry
   ) where
 
 import Control.Monad (forM)
@@ -19,14 +20,26 @@ import System.IO.Unsafe (unsafePerformIO)
 
 import Text.Ginger.TH.Types (Schema(..))
 
+-- | Registry mapping type names to their schemas.
+-- Used to resolve RecursiveRef during validation.
+type SchemaRegistry = Map Text Schema
+
 -- | Generate a Schema from a Haskell type name.
+-- Returns both the schema and a registry of all type schemas encountered.
 -- This is run at compile time via Template Haskell.
-generateSchema :: Name -> Q Schema
+generateSchema :: Name -> Q (Schema, SchemaRegistry)
 generateSchema typeName = do
   -- Use a memoization map to handle recursive types
   visited <- runIO $ newIORef Set.empty
   memo <- runIO $ newIORef Map.empty
-  generateSchemaWithMemo visited memo typeName
+  schema <- generateSchemaWithMemo visited memo typeName
+  -- Convert the memo to a registry with Text keys
+  memoMap <- runIO $ readIORef memo
+  let registry = Map.mapKeys (Text.pack . nameBase) memoMap
+  -- Also add the root type to the registry
+  let rootName = Text.pack $ nameBase typeName
+  let registry' = Map.insert rootName schema registry
+  return (schema, registry')
 
 -- | Generate schema with memoization for recursive types.
 generateSchemaWithMemo :: IORef (Set Name) -> IORef (Map Name Schema) -> Name -> Q Schema
@@ -35,10 +48,9 @@ generateSchemaWithMemo visited memo typeName = do
   inProgress <- runIO $ readIORef visited
   if typeName `Set.member` inProgress
     then do
-      -- We're in a recursive type. Return a placeholder that will be
-      -- filled in later. For now, we use ScalarSchema as a simple sentinel.
-      -- The actual recursive structure is handled by lazy evaluation.
-      return ScalarSchema  -- Recursive reference, stop here
+      -- We're in a recursive type. Return a reference that can be
+      -- resolved during validation by looking up the type name.
+      return $ RecursiveRef (Text.pack $ nameBase typeName)
     else do
       -- Check memo
       memoized <- runIO $ readIORef memo

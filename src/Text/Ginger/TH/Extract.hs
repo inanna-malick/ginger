@@ -10,6 +10,7 @@ module Text.Ginger.TH.Extract
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
+import Control.Monad (foldM)
 import Control.Monad.Writer.Strict (Writer, execWriter, tell)
 import Data.Maybe (catMaybes, maybeToList)
 import Text.Parsec.Pos (SourcePos)
@@ -31,39 +32,48 @@ extractVariableAccesses stmt = execWriter (walkStatement Set.empty stmt)
 
 -- | Walk a statement, collecting access paths.
 -- The scope parameter tracks locally bound variables.
-walkStatement :: LocalScope -> Statement SourcePos -> Writer [AccessPath] ()
+-- Returns the updated scope (for sequential binding via SetVarS).
+walkStatement :: LocalScope -> Statement SourcePos -> Writer [AccessPath] LocalScope
 walkStatement scope stmt = case stmt of
   MultiS _ stmts ->
-    mapM_ (walkStatement scope) stmts
+    -- Process statements sequentially, threading scope through
+    -- so that SetVarS bindings are visible to subsequent statements
+    foldM walkStatement scope stmts
 
-  ScopedS _ body ->
-    -- ScopedS creates isolated scope, but we still track bindings
-    walkStatement scope body
+  ScopedS _ body -> do
+    -- ScopedS creates isolated scope - bindings don't escape
+    _ <- walkStatement scope body
+    return scope
 
   IndentS _ expr body -> do
     walkExpression scope expr
     walkStatement scope body
 
   LiteralS _ _ ->
-    return ()
+    return scope
 
-  InterpolationS _ expr ->
+  InterpolationS _ expr -> do
     walkExpression scope expr
+    return scope
 
-  ExpressionS _ expr ->
+  ExpressionS _ expr -> do
     walkExpression scope expr
+    return scope
 
   IfS _ cond trueBranch falseBranch -> do
     walkExpression scope cond
-    walkStatement scope trueBranch
-    walkStatement scope falseBranch
+    -- Both branches see the same scope; bindings don't escape branches
+    _ <- walkStatement scope trueBranch
+    _ <- walkStatement scope falseBranch
+    return scope
 
   SwitchS _ expr cases defaultCase -> do
     walkExpression scope expr
     mapM_ (\(caseExpr, caseBody) -> do
       walkExpression scope caseExpr
       walkStatement scope caseBody) cases
-    walkStatement scope defaultCase
+    _ <- walkStatement scope defaultCase
+    return scope
 
   ForS _ mIndex varName iterExpr body -> do
     -- The iterable expression is evaluated in outer scope
@@ -73,45 +83,49 @@ walkStatement scope stmt = case stmt of
           `Set.union` Set.singleton varName
           `Set.union` maybe Set.empty Set.singleton mIndex
           `Set.union` Set.singleton "loop"
-    walkStatement scope' body
+    -- Bindings inside loop body don't escape the loop
+    _ <- walkStatement scope' body
+    return scope
 
   SetVarS _ varName expr -> do
-    -- RHS is evaluated in current scope
+    -- RHS is evaluated in current scope (before binding)
     walkExpression scope expr
-    -- Note: SetVarS binds in enclosing scope, but that's handled
-    -- by the runtime. For extraction, we just note that after this
-    -- point the variable is bound. However, since we do a single pass,
-    -- we don't track this. This is a simplification - SetVarS variables
-    -- used before definition would be flagged as free variables.
+    -- Return scope with the new binding for subsequent statements
+    return $ Set.insert varName scope
 
-  DefMacroS _ _macroName (Macro argNames body) -> do
+  DefMacroS _ macroName (Macro argNames body) -> do
     -- Macro body has its own scope with just the arguments
     let macroScope = Set.fromList argNames
           `Set.union` Set.singleton "varargs"
           `Set.union` Set.singleton "kwargs"
-    walkStatement macroScope body
+    _ <- walkStatement macroScope body
+    -- The macro name is now available in scope
+    return $ Set.insert macroName scope
 
   BlockRefS _ _ ->
-    return ()
+    return scope
 
-  PreprocessedIncludeS _ includedTpl ->
-    -- Included templates share scope
+  PreprocessedIncludeS _ includedTpl -> do
+    -- Included templates share scope and can add bindings
     walkStatement scope (templateBody includedTpl)
 
   NullS _ ->
-    return ()
+    return scope
 
   TryCatchS _ tryBody catches finallyBody -> do
-    walkStatement scope tryBody
+    -- Bindings in try/catch/finally don't escape
+    _ <- walkStatement scope tryBody
     mapM_ (walkCatch scope) catches
-    walkStatement scope finallyBody
+    _ <- walkStatement scope finallyBody
+    return scope
 
 -- | Walk a catch block.
 walkCatch :: LocalScope -> CatchBlock SourcePos -> Writer [AccessPath] ()
 walkCatch scope (Catch _ captureVar body) = do
   -- Catch block may bind the exception variable
   let scope' = scope `Set.union` maybe Set.empty Set.singleton captureVar
-  walkStatement scope' body
+  _ <- walkStatement scope' body
+  return ()
 
 -- | Walk an expression, collecting access paths.
 walkExpression :: LocalScope -> Expression SourcePos -> Writer [AccessPath] ()
@@ -159,9 +173,10 @@ walkExpression scope expr = case expr of
     walkExpression scope true
     walkExpression scope false
 
-  DoE _ stmt ->
-    -- Do expressions contain statements
-    walkStatement scope stmt
+  DoE _ stmt -> do
+    -- Do expressions contain statements; bindings don't escape
+    _ <- walkStatement scope stmt
+    return ()
 
 -- | Try to collect a chain of member lookups into a single AccessPath.
 -- Returns (rootVarName, pathSegments, rootPosition) if successful.

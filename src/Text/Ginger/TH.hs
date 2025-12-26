@@ -73,7 +73,7 @@ import Text.Ginger.Run.Type (Run, ContextEncodable, RuntimeError)
 import Text.Ginger.TH.Types
 import Text.Ginger.TH.Builtins (isBuiltin)
 import Text.Ginger.TH.Extract (extractFromTemplate)
-import Text.Ginger.TH.Schema (generateSchema)
+import Text.Ginger.TH.Schema (generateSchema, SchemaRegistry)
 import Text.Ginger.TH.Validate (validatePaths, formatValidationErrors)
 
 -- | Load and type-check a template from a file at compile time.
@@ -129,7 +129,7 @@ validateAndEmbed typeName mPath src = do
     Right tpl -> return tpl
 
   -- Generate schema from the Haskell type
-  schema <- generateSchema typeName
+  (schema, registry) <- generateSchema typeName
 
   -- Extract variable accesses from template
   let accesses = extractFromTemplate template
@@ -138,7 +138,7 @@ validateAndEmbed typeName mPath src = do
   let userAccesses = filter (not . isBuiltin . apRoot) accesses
 
   -- Validate accesses against schema
-  let errors = validatePaths schema userAccesses
+  let errors = validatePaths registry schema userAccesses
 
   -- Report errors or generate code
   when (not $ null errors) $
