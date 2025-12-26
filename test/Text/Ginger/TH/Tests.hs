@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE FlexibleInstances #-}
 -- | Tests for the compile-time type-checked template system.
 module Text.Ginger.TH.Tests
   ( thTests
@@ -7,8 +8,10 @@ module Text.Ginger.TH.Tests
 
 import Test.Tasty
 import Test.Tasty.HUnit
+import Test.Tasty.QuickCheck
 
 import Data.Text (Text)
+import qualified Data.Text as Text
 import qualified Data.Set as Set
 import Text.Parsec.Pos (newPos, SourcePos)
 
@@ -25,6 +28,7 @@ thTests = testGroup "Template Haskell Type Checking"
   [ builtinTests
   , extractionTests
   , validationTests
+  , propertyTests
   ]
 
 --------------------------------------------------------------------------------
@@ -274,4 +278,115 @@ nullResolver _ = return Nothing
 -- | Dummy source position for testing.
 dummyPos :: SourcePos
 dummyPos = newPos "test" 1 1
+
+--------------------------------------------------------------------------------
+-- Property Tests
+--------------------------------------------------------------------------------
+
+propertyTests :: TestTree
+propertyTests = testGroup "Properties"
+  [ testGroup "Schema Validation"
+      [ testProperty "record fields are findable" prop_recordFieldsFindable
+      , testProperty "scalar rejects all path segments" prop_scalarRejectsSegments
+      , testProperty "list accepts any key" prop_listAcceptsAnyKey
+      , testProperty "dynamic key on record fails" prop_dynamicKeyOnRecordFails
+      , testProperty "validation is deterministic" prop_validationDeterministic
+      ]
+  , testGroup "Builtins"
+      [ testProperty "builtin filtering is idempotent" prop_builtinFilterIdempotent
+      , testProperty "all builtins are recognized" prop_allBuiltinsRecognized
+      ]
+  ]
+
+-- | All fields listed in a RecordSchema can be accessed.
+prop_recordFieldsFindable :: NonEmptyList (Text, Schema) -> Bool
+prop_recordFieldsFindable (NonEmpty fields) =
+  let schema = RecordSchema fields
+      fieldNames = map fst fields
+      paths = [AccessPath name [] dummyPos | name <- fieldNames]
+  in all (\p -> validatePath schema p == Nothing) paths
+
+-- | ScalarSchema rejects any non-empty path segment.
+prop_scalarRejectsSegments :: NonEmptyList PathSegment -> Bool
+prop_scalarRejectsSegments (NonEmpty segs) =
+  let schema = RecordSchema [("x", ScalarSchema)]
+      path = AccessPath "x" segs dummyPos
+  in case validatePath schema path of
+       Just (AccessOnScalar _) -> True
+       _ -> False
+
+-- | ListSchema accepts any static key (for index access).
+prop_listAcceptsAnyKey :: Text -> Bool
+prop_listAcceptsAnyKey key =
+  let schema = RecordSchema [("items", ListSchema ScalarSchema)]
+      path = AccessPath "items" [StaticKey key] dummyPos
+  in validatePath schema path == Nothing
+
+-- | DynamicKey on a RecordSchema always fails.
+prop_dynamicKeyOnRecordFails :: NonEmptyList (Text, Schema) -> Bool
+prop_dynamicKeyOnRecordFails (NonEmpty fields) =
+  let schema = RecordSchema [("rec", RecordSchema fields)]
+      path = AccessPath "rec" [DynamicKey] dummyPos
+  in case validatePath schema path of
+       Just (DynamicAccessNotAllowed _) -> True
+       _ -> False
+
+-- | Validation of the same path against same schema is deterministic.
+prop_validationDeterministic :: Schema -> AccessPath -> Bool
+prop_validationDeterministic schema path =
+  validatePath schema path == validatePath schema path
+
+-- | Filtering builtins twice gives same result as once.
+prop_builtinFilterIdempotent :: [Text] -> Bool
+prop_builtinFilterIdempotent names =
+  let filtered = filter (not . isBuiltin) names
+      filteredAgain = filter (not . isBuiltin) filtered
+  in filtered == filteredAgain
+
+-- | All names in builtinNames are recognized by isBuiltin.
+prop_allBuiltinsRecognized :: Property
+prop_allBuiltinsRecognized =
+  forAll (elements $ Set.toList builtinNames) isBuiltin
+
+--------------------------------------------------------------------------------
+-- Arbitrary Instances
+--------------------------------------------------------------------------------
+
+instance Arbitrary Text where
+  arbitrary = Text.pack <$> listOf (elements ['a'..'z'])
+  shrink t = Text.pack <$> shrink (Text.unpack t)
+
+instance Arbitrary PathSegment where
+  arbitrary = oneof
+    [ StaticKey <$> arbitrary
+    , pure DynamicKey
+    ]
+  shrink (StaticKey k) = StaticKey <$> shrink k
+  shrink DynamicKey = []
+
+instance Arbitrary Schema where
+  arbitrary = sized genSchema
+    where
+      genSchema 0 = pure ScalarSchema
+      genSchema n = oneof
+        [ pure ScalarSchema
+        , RecordSchema <$> resize 3 (listOf ((,) <$> fieldName <*> genSchema (n `div` 2)))
+        , ListSchema <$> genSchema (n - 1)
+        , SumSchema <$> resize 2 (listOf1 (resize 3 (listOf ((,) <$> fieldName <*> genSchema (n `div` 2)))))
+        ]
+      fieldName = Text.pack <$> listOf1 (elements ['a'..'z'])
+
+  shrink ScalarSchema = []
+  shrink (RecordSchema fields) = ScalarSchema : [RecordSchema fs | fs <- shrink fields]
+  shrink (ListSchema s) = ScalarSchema : s : [ListSchema s' | s' <- shrink s]
+  shrink (SumSchema cs) = ScalarSchema : [SumSchema cs' | cs' <- shrink cs, not (null cs')]
+
+instance Arbitrary AccessPath where
+  arbitrary = AccessPath
+    <$> (Text.pack <$> listOf1 (elements ['a'..'z']))
+    <*> resize 3 (listOf arbitrary)
+    <*> pure dummyPos
+
+  shrink (AccessPath root segs pos) =
+    [AccessPath root segs' pos | segs' <- shrink segs]
 
