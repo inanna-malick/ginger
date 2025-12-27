@@ -53,6 +53,7 @@ builtinNames = Set.fromList
   , "int_ratio"
   , "is_lt"
   , "iterable"
+  , "join"
   , "json"
   , "length"
   , "le"

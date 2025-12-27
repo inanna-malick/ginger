@@ -197,6 +197,15 @@ gfnConcat [x] =
 gfnConcat (x:xs) =
   return $ foldl' gappend (snd x) (fmap snd xs)
 
+-- | Join a list with a separator string.
+-- Usage: {{ items|join(", ") }} or {{ join(items, ", ") }}
+gfnJoin :: Monad m => Function m
+gfnJoin args =
+  let positional = [v | (Nothing, v) <- args]
+      items = fromMaybe [] $ asList =<< headMay positional
+      sep = maybe "" asText $ headMay (Prelude.drop 1 positional)
+  in return . toGVal . Text.intercalate sep $ fmap asText items
+
 looseEquals :: GVal m -> GVal m -> Bool
 looseEquals a b
     | isJust (asFunction a) || isJust (asFunction b) = False

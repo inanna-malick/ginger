@@ -168,6 +168,7 @@ defaultScope =
     , ("int_ratio", fromFunction . variadicNumericFunc 1 $ fromIntegral . intRatio . Prelude.map Prelude.floor)
     , ("is_lt", fromFunction gfnLess)
     , ("iterable", fromFunction . unaryFunc $ toGVal . (\x -> isList x || isDict x))
+    , ("join", fromFunction gfnJoin)
     , ("json", fromFunction gfnJSON)
     , ("length", fromFunction gfnLength)
     , ("le", fromFunction gfnLessEquals)

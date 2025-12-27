@@ -537,6 +537,24 @@ simulationTests = testGroup "Simulation"
             mkTestHtml [] []
                 "{{ [\"hello\", \"world\"]|concat }}"
                 "helloworld"
+        , testGroup "\"join\""
+            [ testCase "with separator" $ do
+                mkTestHtml [] []
+                    "{{ [\"a\", \"b\", \"c\"]|join(\", \") }}"
+                    "a, b, c"
+            , testCase "empty separator" $ do
+                mkTestHtml [] []
+                    "{{ [\"a\", \"b\", \"c\"]|join(\"\") }}"
+                    "abc"
+            , testCase "empty list" $ do
+                mkTestHtml [] []
+                    "{{ []|join(\", \") }}"
+                    ""
+            , testCase "single item" $ do
+                mkTestHtml [] []
+                    "{{ [\"only\"]|join(\", \") }}"
+                    "only"
+            ]
         , testGroup "\"contains\""
             [ testCase "single match" $ do
                 mkTestHtml [] []
