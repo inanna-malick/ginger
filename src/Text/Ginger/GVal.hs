@@ -16,7 +16,19 @@
 -- want to support impure functions, which requires access to the underlying
 -- carrier monad (e.g. 'IO').
 --
--- For generic sum type support, see "Text.Ginger.GVal.Generic".
+-- For generic sum type support (deriving ToGVal for ADTs), import
+-- 'Text.Ginger.GVal.Generic' and use 'genericToGVal':
+--
+-- @
+-- import Text.Ginger.GVal (ToGVal(..))
+-- import Text.Ginger.GVal.Generic (genericToGVal)
+--
+-- data Status = Blocked String | Pursuing Int | Achieved
+--   deriving (Generic)
+--
+-- instance ToGVal m Status where
+--   toGVal = genericToGVal
+-- @
 module Text.Ginger.GVal
 where
 
