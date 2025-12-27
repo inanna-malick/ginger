@@ -987,8 +987,8 @@ includeValidationTests = testGroup "Include Validation"
       paths <- parseAndExtractWithIncludes
         "templates/main.html"
         mainSrc
-        [ ("./templates/header.html", headerSrc)
-        , ("./templates/../nav.html", navSrc)
+        [ ("templates/header.html", headerSrc)
+        , ("templates/../nav.html", navSrc)
         ]
       let userPaths = filter (not . isBuiltin . apRoot) paths
       let roots = Set.fromList $ map apRoot userPaths
