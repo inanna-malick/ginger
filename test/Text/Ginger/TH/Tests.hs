@@ -227,17 +227,26 @@ validationTests = testGroup "Path Validation"
 
   , testCase "sum type - field in all constructors" $ do
       let schema = SumSchema
-            [ [("tag", ScalarSchema), ("name", ScalarSchema)]
-            , [("tag", ScalarSchema), ("value", ScalarSchema)]
+            [ ("ConA", [("tag", ScalarSchema), ("name", ScalarSchema)])
+            , ("ConB", [("tag", ScalarSchema), ("value", ScalarSchema)])
             ]
       let path = mkAccessPath "tag" [] dummyPos
       assertEqual "should be valid" Nothing (validatePath emptyRegistry schema path)
 
+  , testCase "sum type - constructor name access always valid" $ do
+      -- Accessing constructor name (e.g., status.ConA) is always valid
+      let schema = SumSchema
+            [ ("ConA", [("name", ScalarSchema)])
+            , ("ConB", [("value", ScalarSchema)])
+            ]
+      let path = mkAccessPath "ConA" [] dummyPos
+      assertEqual "constructor access should be valid" Nothing (validatePath emptyRegistry schema path)
+
   , testCase "sum type - field not in all constructors (root)" $ do
       -- At root level, missing field in some constructors returns FieldNotFound
       let schema = SumSchema
-            [ [("tag", ScalarSchema), ("name", ScalarSchema)]
-            , [("tag", ScalarSchema), ("value", ScalarSchema)]
+            [ ("ConA", [("tag", ScalarSchema), ("name", ScalarSchema)])
+            , ("ConB", [("tag", ScalarSchema), ("value", ScalarSchema)])
             ]
       let path = mkAccessPath "name" [] dummyPos
       case validatePath emptyRegistry schema path of
@@ -249,8 +258,8 @@ validationTests = testGroup "Path Validation"
   , testCase "sum type - field not in all constructors (nested)" $ do
       -- Nested access returns FieldNotInAllConstructors
       let innerSum = SumSchema
-            [ [("x", ScalarSchema)]
-            , [("y", ScalarSchema)]
+            [ ("ConX", [("x", ScalarSchema)])
+            , ("ConY", [("y", ScalarSchema)])
             ]
       let schema = RecordSchema [("content", innerSum)]
       let path = mkAccessPath "content" [StaticKey "x"] dummyPos
@@ -449,10 +458,14 @@ schemaGenerationTests = testGroup "Schema Generation"
       case schema of
         SumSchema constructors -> do
           assertEqual "should have 2 constructors" 2 (length constructors)
+          -- Check constructor names exist
+          let conNames = map fst constructors
+          assertBool "should have TextContent" $ "TextContent" `elem` conNames
+          assertBool "should have ImageContent" $ "ImageContent" `elem` conNames
           -- TextContent has 1 field, ImageContent has 2
-          let fieldCounts = map length constructors
+          let fieldCounts = map (length . snd) constructors
           assertBool "field counts should be [1,2] or [2,1]" $
-            fieldCounts == [1,2] || fieldCounts == [2,1]
+            sort fieldCounts == [1,2]
         _ -> assertFailure $ "expected SumSchema, got: " ++ show schema
 
   , testCase "sum type with shared field" $ do
@@ -460,8 +473,12 @@ schemaGenerationTests = testGroup "Schema Generation"
       case schema of
         SumSchema constructors -> do
           assertEqual "should have 2 constructors" 2 (length constructors)
+          -- Check constructor names
+          let conNames = map fst constructors
+          assertBool "should have Dog" $ "Dog" `elem` conNames
+          assertBool "should have Cat" $ "Cat" `elem` conNames
           -- animalName should be in both constructors
-          let hasAnimalName = all (any ((== "animalName") . fst)) constructors
+          let hasAnimalName = all (any ((== "animalName") . fst) . snd) constructors
           assertBool "animalName should be in all constructors" hasAnimalName
           -- Validate that animalName access is valid
           let path = mkAccessPath "animalName" [] dummyPos
@@ -544,12 +561,17 @@ schemaGenerationTests = testGroup "Schema Generation"
         RecordSchema fields -> do
           assertBool "should have wofName" $ any ((== "wofName") . fst) fields
           assertBool "should have wofStatus" $ any ((== "wofStatus") . fst) fields
-          -- wofStatus should be opaque (SumSchema with empty field lists)
+          -- wofStatus should be opaque (SumSchema with empty field lists per constructor)
           case lookup "wofStatus" fields of
-            Just (SumSchema fieldSets) -> do
+            Just (SumSchema constructors) -> do
               -- Non-record sum types have constructors with no named fields
               assertBool "opaque sum type has empty field sets" $
-                all null fieldSets
+                all (null . snd) constructors
+              -- But constructor names are present
+              let conNames = map fst constructors
+              assertBool "should have Active" $ "Active" `elem` conNames
+              assertBool "should have Inactive" $ "Inactive" `elem` conNames
+              assertBool "should have Pending" $ "Pending" `elem` conNames
             Just other -> assertFailure $ "expected SumSchema for Status, got: " ++ show other
             Nothing -> assertFailure "missing wofStatus field"
           -- Accessing wofName should succeed
@@ -590,8 +612,13 @@ schemaGenerationTests = testGroup "Schema Generation"
       case schema of
         SumSchema constructors -> do
           assertEqual "should have 3 constructors" 3 (length constructors)
+          -- Check constructor names
+          let conNames = map fst constructors
+          assertBool "should have TextBlock" $ "TextBlock" `elem` conNames
+          assertBool "should have ImageBlock" $ "ImageBlock" `elem` conNames
+          assertBool "should have Divider" $ "Divider" `elem` conNames
           -- TextBlock and ImageBlock have mcText/mcUrl, Divider has nothing
-          let fieldCounts = map length constructors
+          let fieldCounts = map (length . snd) constructors
           assertBool "should have 0, 1, and 1 fields" $
             sort fieldCounts == [0, 1, 1]
         _ -> assertFailure $ "expected SumSchema, got: " ++ show schema
@@ -695,6 +722,42 @@ narrowingTests = testGroup "Narrowing (is defined guards)"
       -- At least one x should be narrowed (the one in the body)
       let hasNarrowed = any (not . Set.null . apNarrowed) xPaths
       assertBool "x should be narrowed (not undefined = defined)" hasNarrowed
+
+  , testCase "prefix narrowing: parent guard covers child" $ do
+      -- {% if user.profile is defined %}{{ user.profile.name }}{% endif %}
+      -- user.profile.name should be narrowed because user.profile is guarded
+      paths <- parseAndExtract "{% if user.profile is defined %}{{ user.profile.name }}{% endif %}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      -- Should have 1 path (user.profile.name in body)
+      assertEqual "should have 1 path" 1 (length userPaths)
+      let path = head userPaths
+      -- The path should be narrowed (prefix-based)
+      assertBool "user.profile.name should be narrowed via prefix" (isNarrowedBy path)
+
+  , testCase "prefix narrowing: exact match still works" $ do
+      -- {% if x.y is defined %}{{ x.y }}{% endif %}
+      -- Exact match case
+      paths <- parseAndExtract "{% if x.y is defined %}{{ x.y }}{% endif %}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      assertEqual "should have 1 path" 1 (length userPaths)
+      assertBool "x.y should be narrowed (exact match)" (isNarrowedBy $ head userPaths)
+
+  , testCase "prefix narrowing: sibling not narrowed" $ do
+      -- {% if user.profile is defined %}{{ user.other }}{% endif %}
+      -- user.other should NOT be narrowed (different path)
+      paths <- parseAndExtract "{% if user.profile is defined %}{{ user.other }}{% endif %}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      assertEqual "should have 1 path" 1 (length userPaths)
+      -- user.other is not narrowed because user.profile doesn't prefix it
+      assertBool "user.other should NOT be narrowed" (not $ isNarrowedBy $ head userPaths)
+
+  , testCase "prefix narrowing: root only narrows all children" $ do
+      -- {% if user is defined %}{{ user.profile.name }}{% endif %}
+      -- If the root is guarded, all accesses through it are safe
+      paths <- parseAndExtract "{% if user is defined %}{{ user.profile.name }}{% endif %}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      assertEqual "should have 1 path" 1 (length userPaths)
+      assertBool "user.profile.name should be narrowed via root" (isNarrowedBy $ head userPaths)
   ]
 
 --------------------------------------------------------------------------------
@@ -944,9 +1007,11 @@ instance Arbitrary Schema where
         [ pure ScalarSchema
         , RecordSchema <$> resize 3 (listOf ((,) <$> fieldName <*> genSchema (n `div` 2)))
         , ListSchema <$> genSchema (n - 1)
-        , SumSchema <$> resize 2 (listOf1 (resize 3 (listOf ((,) <$> fieldName <*> genSchema (n `div` 2)))))
+        , SumSchema <$> resize 2 (listOf1 genConstructor)
         ]
+      genConstructor = (,) <$> conName <*> resize 3 (listOf ((,) <$> fieldName <*> arbitrary))
       fieldName = Text.pack <$> listOf1 (elements ['a'..'z'])
+      conName = Text.pack . ("Con" ++) <$> listOf1 (elements ['A'..'Z'])
 
   shrink ScalarSchema = []
   shrink (RecordSchema fields) = ScalarSchema : [RecordSchema fs | fs <- shrink fields]

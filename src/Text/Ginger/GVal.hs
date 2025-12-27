@@ -347,18 +347,21 @@ matchFuncArgs names args =
 -- * Multi-field record constructors create a nested dictionary
 -- * Multi-field positional constructors use @_0@, @_1@, etc.
 --
--- Usage with DefaultSignatures (recommended):
+-- Usage (recommended pattern):
 --
 -- @
--- {-# LANGUAGE DeriveAnyClass #-}
 -- {-# LANGUAGE DeriveGeneric #-}
+-- {-# LANGUAGE FlexibleInstances #-}
+-- {-# LANGUAGE MultiParamTypeClasses #-}
 --
 -- data Status = Blocked String | Pursuing Int | Achieved
---   deriving stock (Generic)
---   deriving anyclass (ToGVal m)  -- requires AllowAmbiguousTypes or explicit @m
+--   deriving (Generic)
+--
+-- -- Empty instance body uses the default implementation
+-- instance ToGVal m Status
 -- @
 --
--- Or with explicit instance:
+-- Or with explicit implementation:
 --
 -- @
 -- instance ToGVal m Status where
@@ -469,10 +472,11 @@ class ToGVal m a where
     toGVal :: a -> GVal m
 
     -- | Default implementation using GHC.Generics.
-    -- Enable with @DeriveAnyClass@ and @DeriveGeneric@:
+    -- For types with a Generic instance, just write an empty instance:
     --
     -- @
-    -- data MyType = ... deriving stock (Generic) deriving anyclass (ToGVal m)
+    -- data MyType = ... deriving (Generic)
+    -- instance ToGVal m MyType
     -- @
     default toGVal :: (Generic a, GToGVal m (Rep a)) => a -> GVal m
     toGVal = genericToGVal

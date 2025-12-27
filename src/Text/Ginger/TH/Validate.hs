@@ -53,11 +53,39 @@ resolveSchema registry (RecursiveRef typeName) =
 resolveSchema _ schema = schema
 
 -- | Look up a field in a sum type.
--- If not guarded: field must exist in ALL constructors.
--- If guarded (by @is defined@): field must exist in at least one constructor.
-lookupSumField :: Text -> [[(Text, Schema)]] -> Bool -> Maybe Schema
-lookupSumField fieldName constructors isGuarded =
-  let lookups = map (lookup fieldName) constructors
+-- Constructors are stored as (constructorName, [(fieldName, fieldSchema)]).
+--
+-- Valid accesses:
+-- 1. Constructor name access (e.g., @status.Blocked@): Always valid.
+--    When guarded by @is defined@, returns the constructor's inner schema.
+--    This enables the pattern: @{% if status.Blocked is defined %}{{ status.Blocked }}{% endif %}@
+-- 2. Field access: Must exist in ALL constructors (unless guarded).
+lookupSumField :: Text -> [(Text, [(Text, Schema)])] -> Bool -> Maybe Schema
+lookupSumField name constructors isGuarded =
+  -- First, check if 'name' is a constructor name
+  case lookup name constructors of
+    Just fields ->
+      -- It's a constructor name access (e.g., status.Blocked)
+      -- Return the schema of the constructor's inner value
+      Just $ constructorInnerSchema fields
+    Nothing ->
+      -- Not a constructor name, look for a field in constructors
+      lookupFieldInConstructors name constructors isGuarded
+
+-- | Get the schema for a constructor's inner value.
+-- For record constructors with multiple fields, returns a RecordSchema.
+-- For single-field constructors, returns that field's schema directly.
+-- For nullary constructors, returns ScalarSchema (truthy value).
+constructorInnerSchema :: [(Text, Schema)] -> Schema
+constructorInnerSchema [] = ScalarSchema  -- Nullary constructor
+constructorInnerSchema [(_, schema)] = schema  -- Single field: unwrap
+constructorInnerSchema fields = RecordSchema fields  -- Multi-field: nested record
+
+-- | Look up a field across all constructors of a sum type.
+lookupFieldInConstructors :: Text -> [(Text, [(Text, Schema)])] -> Bool -> Maybe Schema
+lookupFieldInConstructors fieldName constructors isGuarded =
+  let fieldSets = map snd constructors
+      lookups = map (lookup fieldName) fieldSets
       presentIn = mapMaybe id lookups
   in if null presentIn
      then Nothing  -- Field doesn't exist in any constructor

@@ -89,8 +89,8 @@ schemaFromDec visited memo dec = case dec of
     case checkNoTypeVars' tvs of
       Just reason -> return $ OpaqueSchema reason
       Nothing -> do
-        fieldSets <- mapM (fieldsFromCon visited memo) cons
-        return $ SumSchema fieldSets
+        constructors <- mapM (constructorWithFields visited memo) cons
+        return $ SumSchema constructors
 
   -- Newtype
   NewtypeD _ _ tvs _ con _ ->
@@ -143,38 +143,47 @@ schemaFromCon visited memo con = case con of
   RecGadtC _ _ _ ->
     return $ OpaqueSchema "record GADT"
 
--- | Extract fields from a constructor (for sum types).
--- Returns empty list for non-record constructors (they have no named fields).
+-- | Extract constructor name and fields from a constructor (for sum types).
+-- Returns (constructorName, fields) where fields may be empty for non-record constructors.
 -- This allows sum types with mixed constructor styles to be used in templates,
 -- as long as only record constructors' fields are accessed.
-fieldsFromCon :: IORef (Set Name) -> IORef (Map Name Schema) -> Con -> Q [(Text, Schema)]
-fieldsFromCon visited memo con = case con of
-  RecC _ fields -> do
-    forM fields $ \(fieldName, _, fieldType) -> do
+constructorWithFields :: IORef (Set Name) -> IORef (Map Name Schema) -> Con -> Q (Text, [(Text, Schema)])
+constructorWithFields visited memo con = case con of
+  RecC name fields -> do
+    fieldSchemas <- forM fields $ \(fieldName, _, fieldType) -> do
       schema <- schemaFromType visited memo fieldType
       return (Text.pack $ nameBase fieldName, schema)
+    return (Text.pack $ nameBase name, fieldSchemas)
 
-  NormalC _ _ ->
+  NormalC name _ ->
     -- Non-record constructor, no named fields accessible
-    return []
+    return (Text.pack $ nameBase name, [])
 
-  InfixC _ _ _ ->
+  InfixC _ name _ ->
     -- Infix constructor, no named fields accessible
-    return []
+    return (Text.pack $ nameBase name, [])
 
   ForallC _ _ inner ->
     -- Unwrap the forall and try the inner constructor
-    fieldsFromCon visited memo inner
+    constructorWithFields visited memo inner
 
-  GadtC _ _ _ ->
+  GadtC names _ _ ->
     -- GADT constructor, no named fields accessible
-    return []
+    -- Use first name if multiple
+    let name = case names of
+          (n:_) -> n
+          [] -> error "GadtC with no names"
+    in return (Text.pack $ nameBase name, [])
 
-  RecGadtC _ fields _ ->
+  RecGadtC names fields _ -> do
     -- Record GADT has named fields
-    forM fields $ \(fieldName, _, fieldType) -> do
+    let name = case names of
+          (n:_) -> n
+          [] -> error "RecGadtC with no names"
+    fieldSchemas <- forM fields $ \(fieldName, _, fieldType) -> do
       schema <- schemaFromType visited memo fieldType
       return (Text.pack $ nameBase fieldName, schema)
+    return (Text.pack $ nameBase name, fieldSchemas)
 
 -- | Generate schema from a Type.
 -- Returns OpaqueSchema for unsupported types instead of failing.

@@ -7,18 +7,20 @@
 -- This module re-exports 'genericToGVal' and 'GToGVal' from "Text.Ginger.GVal"
 -- for backwards compatibility. New code can import directly from "Text.Ginger.GVal".
 --
--- With @DefaultSignatures@, you can now derive 'ToGVal' instances directly:
+-- With @DefaultSignatures@, you can derive 'ToGVal' with an empty instance:
 --
 -- @
--- {-# LANGUAGE DeriveAnyClass #-}
 -- {-# LANGUAGE DeriveGeneric #-}
+-- {-# LANGUAGE FlexibleInstances #-}
+-- {-# LANGUAGE MultiParamTypeClasses #-}
 --
 -- data Status = Blocked String | Pursuing Int | Achieved
---   deriving stock (Generic)
---   deriving anyclass (ToGVal m)
+--   deriving (Generic)
+--
+-- instance ToGVal m Status  -- empty body uses default
 -- @
 --
--- Or use the explicit instance pattern:
+-- Or use the explicit pattern:
 --
 -- @
 -- instance ToGVal m Status where

@@ -31,9 +31,16 @@ import Text.Ginger.AST (Template)
 data Schema
   = RecordSchema [(Text, Schema)]
     -- ^ Product type (single-constructor record) with named fields
-  | SumSchema [[(Text, Schema)]]
-    -- ^ Sum type with multiple constructors, each having its own field set.
-    -- For a field to be valid, it must exist in ALL constructors.
+  | SumSchema [(Text, [(Text, Schema)])]
+    -- ^ Sum type with multiple constructors. Each entry is
+    -- @(constructorName, fields)@.
+    --
+    -- Valid accesses:
+    --
+    -- * @.constructorName@ - always valid, returns the constructor's inner value
+    --   if active, else undefined (for use with @is defined@ guards)
+    -- * @.fieldName@ - valid only if field exists in ALL constructors
+    --   (unless guarded by @is defined@)
   | ListSchema Schema
     -- ^ List or Vector type, element schema
   | ScalarSchema
@@ -85,10 +92,30 @@ toNarrowedPath :: AccessPath -> NarrowedPath
 toNarrowedPath (AccessPath root path _ _) = NarrowedPath root path
 
 -- | Check if an AccessPath is narrowed by one of the paths in the narrowing context.
--- An access is considered narrowed if its exact path exists in the narrowed set.
+-- An access is considered narrowed if:
+--   1. Its exact path exists in the narrowed set, OR
+--   2. Any prefix of its path exists in the narrowed set
+--
+-- For example, if @user.profile@ is narrowed (guarded by @is defined@),
+-- then @user.profile.name@ is also considered narrowed because if
+-- @user.profile@ exists, accessing @.name@ on it is safe.
 isNarrowedBy :: AccessPath -> Bool
 isNarrowedBy (AccessPath root path _ narrowed) =
-  NarrowedPath root path `Set.member` narrowed
+  any (isNarrowingPrefix root path) (Set.toList narrowed)
+
+-- | Check if a NarrowedPath is a prefix of (or equal to) the given access.
+-- A narrowed path is a prefix if:
+--   1. The roots match, AND
+--   2. The narrowed path segments are a prefix of the access path segments
+isNarrowingPrefix :: Text -> [PathSegment] -> NarrowedPath -> Bool
+isNarrowingPrefix accessRoot accessPath (NarrowedPath narrowedRoot narrowedPath) =
+  accessRoot == narrowedRoot && narrowedPath `isPrefixOfPath` accessPath
+
+-- | Check if the first list is a prefix of the second.
+isPrefixOfPath :: Eq a => [a] -> [a] -> Bool
+isPrefixOfPath [] _ = True
+isPrefixOfPath _ [] = False
+isPrefixOfPath (x:xs) (y:ys) = x == y && isPrefixOfPath xs ys
 
 -- | Validation error for a single access path.
 data ValidationError
