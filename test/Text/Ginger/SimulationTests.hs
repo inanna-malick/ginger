@@ -920,6 +920,10 @@ simulationTests = testGroup "Simulation"
                 mkTestHtml [] [] "{{ ['a','c','b']|max }}" "c"
             , testCase "max of args" $ do
                 mkTestHtml [] [] "{{ max(1,3,2) }}" "3"
+            , testCase "max with double digits (numeric compare)" $ do
+                mkTestHtml [] [] "{{ [3,10,2]|max }}" "10"
+            , testCase "max of empty list" $ do
+                mkTestHtml [] [] "{{ []|max }}" ""
             ]
         , testGroup "\"min\""
             [ testCase "min of list" $ do
@@ -928,6 +932,10 @@ simulationTests = testGroup "Simulation"
                 mkTestHtml [] [] "{{ ['c','a','b']|min }}" "a"
             , testCase "min of args" $ do
                 mkTestHtml [] [] "{{ min(3,1,2) }}" "1"
+            , testCase "min with double digits (numeric compare)" $ do
+                mkTestHtml [] [] "{{ [10,3,20]|min }}" "3"
+            , testCase "min of empty list" $ do
+                mkTestHtml [] [] "{{ []|min }}" ""
             ]
         , testGroup "\"title\""
             [ testCase "title case" $ do

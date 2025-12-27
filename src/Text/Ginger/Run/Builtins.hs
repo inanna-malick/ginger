@@ -929,14 +929,14 @@ gfnMax args =
     case args of
         [(_, g)] ->
             case asList g of
+                Just [] -> return def
                 Just items -> return $ List.maximumBy compareGVal items
                 Nothing -> return def
+        [] -> return def
         _ ->
             -- Multiple args: find max of all
             let vals = fmap snd args
             in return $ List.maximumBy compareGVal vals
-  where
-    compareGVal a b = Prelude.compare (asText a) (asText b)
 
 -- | Get the minimum value from a list
 gfnMin :: Monad m => Function m
@@ -944,13 +944,20 @@ gfnMin args =
     case args of
         [(_, g)] ->
             case asList g of
+                Just [] -> return def
                 Just items -> return $ List.minimumBy compareGVal items
                 Nothing -> return def
+        [] -> return def
         _ ->
             -- Multiple args: find min of all
             let vals = fmap snd args
             in return $ List.minimumBy compareGVal vals
-  where
-    compareGVal a b = Prelude.compare (asText a) (asText b)
+
+-- | Compare GVals: prefer numeric comparison, fall back to text
+compareGVal :: GVal m -> GVal m -> Prelude.Ordering
+compareGVal a b =
+    case (asNumber a, asNumber b) of
+        (Just na, Just nb) -> Prelude.compare na nb
+        _ -> Prelude.compare (asText a) (asText b)
 
 -- vim: sw=4 ts=4 expandtab
