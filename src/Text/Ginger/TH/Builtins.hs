@@ -92,6 +92,16 @@ builtinNames = Set.fromList
   , "in"
   , "escaped"
   , "regex"
+    -- Type-checking predicates (is_ prefix for "x is foo" syntax)
+  , "is_mapping"
+  , "is_none"
+  , "is_number"
+  , "is_sequence"
+  , "is_string"
+  , "is_callable"
+    -- Case predicates (is_ prefix for "x is foo" syntax)
+  , "is_lower"
+  , "is_upper"
     -- Boolean/null literals (parsed as VarE in some contexts)
   , "true"
   , "True"

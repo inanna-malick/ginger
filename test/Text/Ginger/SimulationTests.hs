@@ -470,6 +470,72 @@ simulationTests = testGroup "Simulation"
                     "{% if odd(\"3\") %}yes{% else %}no{% endif %}"
                     "yes"
             ]
+        , testGroup "\"mapping\""
+            [ testCase "dict is mapping" $ do
+                mkTestHtml [] [] "{% if {'a': 1} is mapping %}yes{% else %}no{% endif %}" "yes"
+            , testCase "list is not mapping" $ do
+                mkTestHtml [] [] "{% if [1,2,3] is mapping %}yes{% else %}no{% endif %}" "no"
+            , testCase "string is not mapping" $ do
+                mkTestHtml [] [] "{% if 'hello' is mapping %}yes{% else %}no{% endif %}" "no"
+            ]
+        , testGroup "\"none\""
+            [ testCase "null is none" $ do
+                mkTestHtml [] [] "{% if null is none %}yes{% else %}no{% endif %}" "yes"
+            , testCase "string is not none" $ do
+                mkTestHtml [] [] "{% if 'hello' is none %}yes{% else %}no{% endif %}" "no"
+            , testCase "0 is not none" $ do
+                mkTestHtml [] [] "{% if 0 is none %}yes{% else %}no{% endif %}" "no"
+            ]
+        , testGroup "\"number\""
+            [ testCase "integer is number" $ do
+                mkTestHtml [] [] "{% if 42 is number %}yes{% else %}no{% endif %}" "yes"
+            , testCase "float is number" $ do
+                mkTestHtml [] [] "{% if 3.14 is number %}yes{% else %}no{% endif %}" "yes"
+            , testCase "numeric string is number" $ do
+                mkTestHtml [] [] "{% if '123' is number %}yes{% else %}no{% endif %}" "yes"
+            , testCase "non-numeric string is not number" $ do
+                mkTestHtml [] [] "{% if 'hello' is number %}yes{% else %}no{% endif %}" "no"
+            ]
+        , testGroup "\"sequence\""
+            [ testCase "list is sequence" $ do
+                mkTestHtml [] [] "{% if [1,2,3] is sequence %}yes{% else %}no{% endif %}" "yes"
+            , testCase "dict is not sequence" $ do
+                mkTestHtml [] [] "{% if {'a': 1} is sequence %}yes{% else %}no{% endif %}" "no"
+            , testCase "string is not sequence" $ do
+                mkTestHtml [] [] "{% if 'hello' is sequence %}yes{% else %}no{% endif %}" "no"
+            ]
+        , testGroup "\"string\""
+            [ testCase "string is string" $ do
+                mkTestHtml [] [] "{% if 'hello' is string %}yes{% else %}no{% endif %}" "yes"
+            , testCase "number is not string" $ do
+                mkTestHtml [] [] "{% if 42 is string %}yes{% else %}no{% endif %}" "no"
+            , testCase "list is not string" $ do
+                mkTestHtml [] [] "{% if [1,2,3] is string %}yes{% else %}no{% endif %}" "no"
+            ]
+        , testGroup "\"callable\""
+            [ testCase "function is callable" $ do
+                mkTestHtml [] [] "{% if sum is callable %}yes{% else %}no{% endif %}" "yes"
+            , testCase "string is not callable" $ do
+                mkTestHtml [] [] "{% if 'hello' is callable %}yes{% else %}no{% endif %}" "no"
+            , testCase "lambda is callable" $ do
+                mkTestHtml [] [] "{% if ((x) -> x * 2) is callable %}yes{% else %}no{% endif %}" "yes"
+            ]
+        , testGroup "\"lower\""
+            [ testCase "lowercase string" $ do
+                mkTestHtml [] [] "{% if 'hello' is lower %}yes{% else %}no{% endif %}" "yes"
+            , testCase "mixed case string" $ do
+                mkTestHtml [] [] "{% if 'Hello' is lower %}yes{% else %}no{% endif %}" "no"
+            , testCase "uppercase string" $ do
+                mkTestHtml [] [] "{% if 'HELLO' is lower %}yes{% else %}no{% endif %}" "no"
+            ]
+        , testGroup "\"upper\""
+            [ testCase "uppercase string" $ do
+                mkTestHtml [] [] "{% if 'HELLO' is upper %}yes{% else %}no{% endif %}" "yes"
+            , testCase "mixed case string" $ do
+                mkTestHtml [] [] "{% if 'Hello' is upper %}yes{% else %}no{% endif %}" "no"
+            , testCase "lowercase string" $ do
+                mkTestHtml [] [] "{% if 'hello' is upper %}yes{% else %}no{% endif %}" "no"
+            ]
         ]
    , testGroup "Built-in filters/functions"
         [ testCase "\"abs\"" $ do

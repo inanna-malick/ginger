@@ -1199,7 +1199,7 @@ testExprP = do
     pos <- getPosition
     keyword "is"
     spacesOrComment
-    isDefinedTestP pos <|> regularTestP pos
+    try (isDefinedTestP pos) <|> regularTestP pos
     where
       -- Special case for "is [not] defined" / "is [not] undefined"
       isDefinedTestP pos = do

@@ -211,25 +211,29 @@ defaultScope =
 
     , ("regex", gfoRegex)
 
-    -- TODO: sameas (predicate)
-    -- NOTE that this test doesn't make sense in a host language where pointers
-    -- are transparent - in Haskell, we simply don't care whether two values
-    -- share a memory location or not, and whether they do or not might even
-    -- depend on build flags.
+    -- NOTE: sameas doesn't make sense in Haskell where pointer identity is transparent
 
-    -- TODO: mapping (predicate)
-    -- TODO: none (predicate)
-    -- TODO: number (predicate)
-    -- TODO: sequence (predicate)
-    -- TODO: string (predicate)
-    -- TODO: callable
+    -- Type-checking predicates (prefixed with is_ for "x is foo" syntax)
+    , ("is_mapping", fromFunction . unaryFunc $ toGVal . isDict)
+    , ("is_none", fromFunction . unaryFunc $ toGVal . isNull)
+    , ("is_number", fromFunction . unaryFunc $ toGVal . isJust . asNumber)
+    , ("is_sequence", fromFunction . unaryFunc $ toGVal . isList)
+    , ("is_string", fromFunction . unaryFunc $ toGVal . isStringy)
+    , ("is_callable", fromFunction . unaryFunc $ toGVal . isJust . asFunction)
 
     -- NOTE: @defined@ and @undefined@ are implemented as special syntax in the
     -- parser (IsDefinedE), not as regular functions. See issue #33.
 
-    -- TODO: lower (predicate)
-    -- TODO: upper (predicate)
+    -- Case predicates (for strings, prefixed with is_ for "x is foo" syntax)
+    , ("is_lower", fromFunction . unaryFunc $ toGVal . (\g -> asText g == Text.toLower (asText g) && not (Text.null (asText g))))
+    , ("is_upper", fromFunction . unaryFunc $ toGVal . (\g -> asText g == Text.toUpper (asText g) && not (Text.null (asText g))))
     ]
+
+-- | Check if a GVal is "stringy" - not null, not a list, not a dict, not a function,
+-- and not primarily a number (numbers that happen to have string representation don't count).
+-- This is an approximation since GVal is dynamically typed.
+isStringy :: GVal m -> Bool
+isStringy g = not (isNull g) && not (isList g) && not (isDict g) && isNothing (asFunction g) && isNothing (asNumber g)
 
 -- | Simplified interface to render a ginger template \"into\" a monad.
 --
