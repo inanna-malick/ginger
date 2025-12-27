@@ -226,9 +226,16 @@ simulationTests = testGroup "Simulation"
             mkTestHtml [] [] "{% if false %}yes{% elif true %}maybe{% else %}no{% endif %}" "maybe"
         , testCase "if null should be false" $ do
             mkTestHtml [] [] "{% if null %}yes{% else %}no{% endif %}" "no"
---        TODO: Implement "not"
---        , testCase "if not true then \"yes\" else \"no\"" $ do
---            mkTestHtml [] [] "{% if not true %}yes{% else %}no{% endif %}" "no"
+        , testCase "if not true then \"yes\" else \"no\"" $ do
+            mkTestHtml [] [] "{% if not true %}yes{% else %}no{% endif %}" "no"
+        , testCase "if not false then \"yes\" else \"no\"" $ do
+            mkTestHtml [] [] "{% if not false %}yes{% else %}no{% endif %}" "yes"
+        , testCase "not with variable" $ do
+            mkTestHtml [("active", toGVal False)] [] "{% if not active %}inactive{% endif %}" "inactive"
+        , testCase "not not (double negation)" $ do
+            mkTestHtml [] [] "{% if not not true %}yes{% endif %}" "yes"
+        , testCase "not with and" $ do
+            mkTestHtml [] [] "{% if not false and true %}yes{% endif %}" "yes"
         ]
     , testGroup "Exceptions"
         [ testCase "try/catch, no exception" $ do

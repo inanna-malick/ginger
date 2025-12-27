@@ -178,6 +178,7 @@ defaultScope =
     , ("lt", fromFunction gfnLess)
     , ("map", fromFunction gfnMap)
     , ("modulo", fromFunction . variadicNumericFunc 1 $ fromIntegral . modulo . Prelude.map Prelude.floor)
+    , ("not", fromFunction . unaryFunc $ toGVal . Prelude.not . asBoolean)
     , ("ne", fromFunction gfnNEquals)
     , ("nequals", fromFunction gfnNEquals)
     , ("num", fromFunction . unaryFunc $ toGVal . asNumber)

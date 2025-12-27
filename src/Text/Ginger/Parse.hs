@@ -1115,10 +1115,21 @@ multiplicativeExprP =
 postfixExprP :: Monad m => Parser m (Expression SourcePos)
 postfixExprP = do
     pos <- getPosition
-    base <- atomicExprP
+    base <- prefixExprP
     spacesOrComment
     postfixes <- many . try $ postfixP pos `before`spacesOrComment
     return $ foldl (flip ($)) base postfixes
+
+-- | Prefix operators like "not"
+prefixExprP :: Monad m => Parser m (Expression SourcePos)
+prefixExprP = do
+    pos <- getPosition
+    choice
+        [ try (keyword "not" >> spacesOrComment) >> do
+            arg <- prefixExprP  -- Allow chaining: "not not x"
+            return $ CallE pos (VarE pos "not") [(Nothing, arg)]
+        , atomicExprP
+        ]
 
 postfixP :: Monad m => SourcePos -> Parser m ((Expression SourcePos) -> (Expression SourcePos))
 postfixP pos = dotPostfixP pos

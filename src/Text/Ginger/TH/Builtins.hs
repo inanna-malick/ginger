@@ -63,6 +63,7 @@ builtinNames = Set.fromList
   , "lt"
   , "map"
   , "modulo"
+  , "not"
   , "ne"
   , "nequals"
   , "num"
