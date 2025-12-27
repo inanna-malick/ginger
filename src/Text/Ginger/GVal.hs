@@ -2,8 +2,12 @@
 {-#LANGUAGE OverloadedStrings #-}
 {-#LANGUAGE MultiParamTypeClasses #-}
 {-#LANGUAGE FlexibleInstances #-}
+{-#LANGUAGE FlexibleContexts #-}
 {-#LANGUAGE ScopedTypeVariables #-}
 {-#LANGUAGE RankNTypes #-}
+{-#LANGUAGE TypeOperators #-}
+{-#LANGUAGE DefaultSignatures #-}
+{-#LANGUAGE UndecidableInstances #-}
 
 -- | GVal is a generic unitype value, representing the kind of values that
 -- Ginger can understand.
@@ -107,6 +111,7 @@ import Data.Text.Encoding (encodeUtf8, decodeUtf8)
 import qualified Data.Text.Lazy.Encoding as LText
 
 import Text.Ginger.Html
+import GHC.Generics (Generic, Rep, from, (:+:)(..), (:*:)(..), M1(..), D, C, S, K1(..), U1(..), Constructor(..), Selector(..))
 
 -- * The Ginger Value type
 --
@@ -328,11 +333,149 @@ matchFuncArgs names args =
         matched = HashMap.fromList $ fromPositional ++ fromNamed
         named = HashMap.difference namedRaw (HashMap.fromList fromNamed)
 
+-- * Generic deriving support for sum types
+--
+-- | Convert a value with a Generic instance to GVal using sum type representation.
+--
+-- Sum types are represented as dictionaries where:
+--
+-- * Only the active constructor's field is defined
+-- * 'asText' returns the constructor name (for @==@ comparisons)
+-- * 'asBoolean' is 'True' (for truthiness checks)
+-- * 0-field constructors map to a truthy value with constructor name as text
+-- * Single-field constructors unwrap directly
+-- * Multi-field record constructors create a nested dictionary
+-- * Multi-field positional constructors use @_0@, @_1@, etc.
+--
+-- Usage with DefaultSignatures (recommended):
+--
+-- @
+-- {-# LANGUAGE DeriveAnyClass #-}
+-- {-# LANGUAGE DeriveGeneric #-}
+--
+-- data Status = Blocked String | Pursuing Int | Achieved
+--   deriving stock (Generic)
+--   deriving anyclass (ToGVal m)  -- requires AllowAmbiguousTypes or explicit @m
+-- @
+--
+-- Or with explicit instance:
+--
+-- @
+-- instance ToGVal m Status where
+--   toGVal = genericToGVal
+-- @
+--
+genericToGVal :: (Generic a, GToGVal m (Rep a)) => a -> GVal m
+genericToGVal = gToGVal . from
+
+-- | Generic representation class for converting to GVal.
+class GToGVal m f where
+  gToGVal :: f p -> GVal m
+
+-- | Datatype metadata wrapper - just pass through
+instance GToGVal m f => GToGVal m (M1 D c f) where
+  gToGVal (M1 x) = gToGVal x
+
+-- | Constructor wrapper - creates the constructor-as-field representation
+instance (GToGValInner m f, Constructor c) => GToGVal m (M1 C c f) where
+  gToGVal m@(M1 x) =
+    let cName = Text.pack $ conName m
+        inner = gToGValInner 0 x
+    in mkSumGVal cName inner
+
+-- | Sum type combinator - delegates to the active branch
+instance (GToGVal m f, GToGVal m g) => GToGVal m (f :+: g) where
+  gToGVal (L1 x) = gToGVal x
+  gToGVal (R1 x) = gToGVal x
+
+-- | Create a GVal for a sum type constructor.
+-- The constructor name becomes both the asText and the only defined field.
+mkSumGVal :: Text -> GVal m -> GVal m
+mkSumGVal cName inner =
+  def
+    { asText = cName
+    , asHtml = html cName
+    , asBoolean = True
+    , isNull = False
+    , asLookup = Just $ \key ->
+        if key == cName
+          then Just inner
+          else Nothing
+    , asDictItems = Just [(cName, inner)]
+    }
+
+-- | Class for converting constructor fields to GVal.
+-- Handles the inner content of a constructor.
+-- The Int parameter is the field index for positional fields.
+class GToGValInner m f where
+  gToGValInner :: Int -> f p -> GVal m
+
+-- | Unit type (nullary constructor)
+instance GToGValInner m U1 where
+  gToGValInner _ U1 =
+    -- Nullary constructors are truthy with constructor name as text
+    -- (the outer mkSumGVal handles asText, this is just the inner value)
+    def { asBoolean = True, isNull = False, asText = Text.empty }
+
+-- | Single field (leaf node) - unwrap directly
+-- Note: This instance references ToGVal which is defined below.
+-- Haskell allows mutual recursion within a module.
+instance ToGVal m a => GToGValInner m (K1 i a) where
+  gToGValInner _ (K1 x) = toGVal x
+
+-- | Selector (field with name) - record field or positional
+instance (GToGValInner m f, Selector s) => GToGValInner m (M1 S s f) where
+  gToGValInner idx (M1 x) = gToGValInner idx x
+
+-- | Product type (multiple fields) - create a record
+instance (GToGValProduct m f, GToGValProduct m g) => GToGValInner m (f :*: g) where
+  gToGValInner _ prod =
+    let pairs = gCollectFields 0 prod
+    in mkRecordGVal pairs
+
+-- | Create a GVal from record fields
+mkRecordGVal :: [Pair m] -> GVal m
+mkRecordGVal pairs =
+  let hm = HashMap.fromList pairs
+  in def
+    { asBoolean = True
+    , isNull = False
+    , asLookup = Just (`HashMap.lookup` hm)
+    , asDictItems = Just pairs
+    }
+
+-- | Helper class for collecting fields from product types
+class GToGValProduct m f where
+  gCollectFields :: Int -> f p -> [Pair m]
+
+instance (GToGValProduct m f, GToGValProduct m g) => GToGValProduct m (f :*: g) where
+  gCollectFields idx (x :*: y) =
+    let leftFields = gCollectFields idx x
+        leftCount = Prelude.length leftFields
+    in leftFields ++ gCollectFields (idx + leftCount) y
+
+instance (GToGValInner m f, Selector s) => GToGValProduct m (M1 S s f) where
+  gCollectFields idx m@(M1 x) =
+    let fieldName = Text.pack $ selName m
+        name = if Text.null fieldName
+               then Text.pack $ "_" ++ show idx  -- Positional: _0, _1, etc.
+               else fieldName                     -- Named: actual field name
+    in [(name, gToGValInner idx x)]
+
 -- * Marshalling from Haskell to 'GVal'
 --
 -- | Types that implement conversion to 'GVal'.
 class ToGVal m a where
     toGVal :: a -> GVal m
+
+    -- | Default implementation using GHC.Generics.
+    -- Enable with @DeriveAnyClass@ and @DeriveGeneric@:
+    --
+    -- @
+    -- data MyType = ... deriving stock (Generic) deriving anyclass (ToGVal m)
+    -- @
+    default toGVal :: (Generic a, GToGVal m (Rep a)) => a -> GVal m
+    toGVal = genericToGVal
 
 -- | Trivial instance for 'GVal' itself.
 instance ToGVal m (GVal m) where
