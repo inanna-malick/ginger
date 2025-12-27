@@ -56,16 +56,14 @@ module Text.Ginger.TH
 import Control.Monad (when)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.IO as Text
 import Language.Haskell.TH
 import Language.Haskell.TH.Syntax (addDependentFile)
 import Text.Parsec.Pos (SourcePos)
 import Data.Monoid ((<>))
-import Control.Monad.Writer (Writer, execWriter)
+import Control.Monad.Writer (Writer)
 
 import Text.Ginger.AST (Template)
 import Text.Ginger.GVal (ToGVal, GVal)
-import Text.Ginger.Html (Html)
 import Text.Ginger.Parse (parseGinger', ParserError(..), ParserOptions(..), mkParserOptions)
 import Text.Ginger.Run (easyRender, easyRenderM)
 import Text.Ginger.Run.Type (Run, ContextEncodable, RuntimeError)

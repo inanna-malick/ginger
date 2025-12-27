@@ -13,7 +13,6 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import Control.Monad (foldM)
 import Control.Monad.Writer.Strict (Writer, execWriter, tell)
-import Data.Maybe (catMaybes, maybeToList)
 import Text.Parsec.Pos (SourcePos)
 
 import Text.Ginger.AST

@@ -16,7 +16,6 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Language.Haskell.TH
 import Language.Haskell.TH.Syntax (Lift(..))
-import System.IO.Unsafe (unsafePerformIO)
 
 import Text.Ginger.TH.Types (Schema(..))
 
