@@ -75,42 +75,51 @@ generateSchemaForType visited memo typeName = do
     _ -> fail $ "generateSchema: Expected a type, got: " ++ show typeName
 
 -- | Generate schema from a type declaration.
+-- Returns OpaqueSchema for polymorphic or unsupported declarations.
 schemaFromDec :: IORef (Set Name) -> IORef (Map Name Schema) -> Dec -> Q Schema
 schemaFromDec visited memo dec = case dec of
   -- Single constructor data type
-  DataD _ _ tvs _ [con] _ -> do
-    checkNoTypeVars tvs
-    schemaFromCon visited memo con
+  DataD _ _ tvs _ [con] _ ->
+    case checkNoTypeVars' tvs of
+      Just reason -> return $ OpaqueSchema reason
+      Nothing -> schemaFromCon visited memo con
 
   -- Multiple constructors (sum type)
-  DataD _ _ tvs _ cons _ -> do
-    checkNoTypeVars tvs
-    fieldSets <- mapM (fieldsFromCon visited memo) cons
-    return $ SumSchema fieldSets
+  DataD _ _ tvs _ cons _ ->
+    case checkNoTypeVars' tvs of
+      Just reason -> return $ OpaqueSchema reason
+      Nothing -> do
+        fieldSets <- mapM (fieldsFromCon visited memo) cons
+        return $ SumSchema fieldSets
 
   -- Newtype
-  NewtypeD _ _ tvs _ con _ -> do
-    checkNoTypeVars tvs
-    schemaFromCon visited memo con
+  NewtypeD _ _ tvs _ con _ ->
+    case checkNoTypeVars' tvs of
+      Just reason -> return $ OpaqueSchema reason
+      Nothing -> schemaFromCon visited memo con
 
   -- Type synonym
-  TySynD _ tvs ty -> do
-    checkNoTypeVars tvs
-    schemaFromType visited memo ty
+  TySynD _ tvs ty ->
+    case checkNoTypeVars' tvs of
+      Just reason -> return $ OpaqueSchema reason
+      Nothing -> schemaFromType visited memo ty
 
-  _ -> fail $ "generateSchema: Unsupported declaration type: " ++ show dec
+  _ -> return $ OpaqueSchema $ "unsupported declaration: " <> Text.pack (show dec)
 
--- | Check that there are no type variables (reject polymorphic types).
-checkNoTypeVars :: [TyVarBndr a] -> Q ()
-checkNoTypeVars [] = return ()
-checkNoTypeVars tvs = fail $
-  "generateSchema: Polymorphic types are not supported. " ++
-  "Type has type variables: " ++ show (map tvName tvs)
+-- | Check that there are no type variables.
+-- Returns Nothing if OK, Just reason if polymorphic.
+checkNoTypeVars' :: [TyVarBndr a] -> Maybe Text
+checkNoTypeVars' [] = Nothing
+checkNoTypeVars' tvs = Just $
+  "polymorphic type with variables: " <> Text.pack (show (map tvName tvs))
   where
     tvName (PlainTV n _) = n
     tvName (KindedTV n _ _) = n
 
 -- | Generate schema from a constructor.
+-- For unsupported constructor types, returns OpaqueSchema instead of failing.
+-- This allows types with non-record constructors to exist in the type tree
+-- as long as templates don't actually access through them.
 schemaFromCon :: IORef (Set Name) -> IORef (Map Name Schema) -> Con -> Q Schema
 schemaFromCon visited memo con = case con of
   RecC _ fields -> do
@@ -119,22 +128,25 @@ schemaFromCon visited memo con = case con of
       return (Text.pack $ nameBase fieldName, schema)
     return $ RecordSchema fieldSchemas
 
-  NormalC _ _ ->
-    fail "generateSchema: Only record constructors are supported. Use named fields."
+  NormalC name _ ->
+    return $ OpaqueSchema $ "non-record constructor '" <> Text.pack (nameBase name) <> "'"
 
-  InfixC _ _ _ ->
-    fail "generateSchema: Infix constructors are not supported."
+  InfixC _ name _ ->
+    return $ OpaqueSchema $ "infix constructor '" <> Text.pack (nameBase name) <> "'"
 
   ForallC _ _ _ ->
-    fail "generateSchema: Existential types are not supported."
+    return $ OpaqueSchema "existential type"
 
   GadtC _ _ _ ->
-    fail "generateSchema: GADTs are not supported."
+    return $ OpaqueSchema "GADT"
 
   RecGadtC _ _ _ ->
-    fail "generateSchema: Record GADTs are not supported."
+    return $ OpaqueSchema "record GADT"
 
 -- | Extract fields from a constructor (for sum types).
+-- Returns empty list for non-record constructors (they have no named fields).
+-- This allows sum types with mixed constructor styles to be used in templates,
+-- as long as only record constructors' fields are accessed.
 fieldsFromCon :: IORef (Set Name) -> IORef (Map Name Schema) -> Con -> Q [(Text, Schema)]
 fieldsFromCon visited memo con = case con of
   RecC _ fields -> do
@@ -142,17 +154,32 @@ fieldsFromCon visited memo con = case con of
       schema <- schemaFromType visited memo fieldType
       return (Text.pack $ nameBase fieldName, schema)
 
-  NormalC name [] ->
-    -- Nullary constructor, no fields
+  NormalC _ _ ->
+    -- Non-record constructor, no named fields accessible
     return []
 
-  NormalC name _ ->
-    fail $ "generateSchema: Non-record constructor '" ++ nameBase name ++
-           "' with fields is not supported. Use named fields."
+  InfixC _ _ _ ->
+    -- Infix constructor, no named fields accessible
+    return []
 
-  _ -> fail "generateSchema: Unsupported constructor type in sum type."
+  ForallC _ _ inner ->
+    -- Unwrap the forall and try the inner constructor
+    fieldsFromCon visited memo inner
+
+  GadtC _ _ _ ->
+    -- GADT constructor, no named fields accessible
+    return []
+
+  RecGadtC _ fields _ ->
+    -- Record GADT has named fields
+    forM fields $ \(fieldName, _, fieldType) -> do
+      schema <- schemaFromType visited memo fieldType
+      return (Text.pack $ nameBase fieldName, schema)
 
 -- | Generate schema from a Type.
+-- Returns OpaqueSchema for unsupported types instead of failing.
+-- This allows complex types to exist in the tree as long as templates
+-- don't actually access through them.
 schemaFromType :: IORef (Set Name) -> IORef (Map Name Schema) -> Type -> Q Schema
 schemaFromType visited memo ty = case ty of
   -- List type [a]
@@ -171,6 +198,17 @@ schemaFromType visited memo ty = case ty of
         elemSchema <- schemaFromType visited memo elemType
         return $ ListSchema elemSchema
 
+  -- Either a b - opaque (could support in future)
+  AppT (AppT (ConT eitherName) _) _
+    | nameBase eitherName == "Either" ->
+        return $ OpaqueSchema "Either type"
+
+  -- Tuple types - opaque
+  TupleT _ ->
+    return $ OpaqueSchema "tuple type"
+  AppT (TupleT _) _ ->
+    return $ OpaqueSchema "tuple type"
+
   -- Known scalar types
   ConT name
     | isScalarType name -> return ScalarSchema
@@ -178,18 +216,17 @@ schemaFromType visited memo ty = case ty of
   -- Other named types - recurse
   ConT name -> generateSchemaWithMemo visited memo name
 
-  -- Type variable - error
-  VarT name -> fail $
-    "generateSchema: Type variable '" ++ nameBase name ++
-    "' found. Polymorphic fields are not supported."
+  -- Type variable - opaque (polymorphic field)
+  VarT name ->
+    return $ OpaqueSchema $ "type variable '" <> Text.pack (nameBase name) <> "'"
 
-  -- Type application we don't recognize
-  AppT _ _ -> fail $
-    "generateSchema: Unsupported type application: " ++ show ty ++
-    ". Only List, Vector, and Maybe are supported as type constructors."
+  -- Type application we don't recognize - opaque
+  AppT _ _ ->
+    return $ OpaqueSchema $ "unsupported type application: " <> Text.pack (show ty)
 
-  -- Other type forms
-  _ -> fail $ "generateSchema: Unsupported type: " ++ show ty
+  -- Other type forms - opaque
+  _ ->
+    return $ OpaqueSchema $ "unsupported type: " <> Text.pack (show ty)
 
 -- | Check if a type name is a known scalar type.
 isScalarType :: Name -> Bool

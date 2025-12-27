@@ -41,6 +41,11 @@ data Schema
   | RecursiveRef Text
     -- ^ Reference to a recursive type. Used to handle recursive data structures.
     -- The Text is the type name for resolution during validation.
+  | OpaqueSchema Text
+    -- ^ Type that schema generation doesn't understand (e.g., non-record sum types,
+    -- Either, tuples). The Text is a description of why it's opaque.
+    -- This allows types to exist in the tree without causing compile errors,
+    -- as long as templates don't actually access through them.
   deriving (Show, Eq, Data, Typeable, Lift)
 
 -- | A path segment in a variable access chain.
@@ -97,6 +102,9 @@ data ValidationError
     -- ^ Tried to access a field on a scalar type.
   | UnknownType AccessPath Text
     -- ^ Encountered a type we can't analyze.
+  | AccessOnOpaqueType AccessPath Text
+    -- ^ Tried to access a field on a type that schema generation couldn't understand.
+    -- The Text describes why the type is opaque (e.g., "non-record sum type").
   deriving (Show, Eq, Data, Typeable)
 
 -- | A template that has been type-checked against a specific context type.

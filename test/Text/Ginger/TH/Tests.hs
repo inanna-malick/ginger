@@ -10,6 +10,7 @@ import Test.Tasty
 import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck
 
+import Data.List (sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Map.Strict as Map
@@ -397,6 +398,25 @@ withTypeSynonymSchema = $( do
   [| (s, r) |]
  )
 
+-- Schemas for opaque type tests
+withOpaqueFieldSchema :: (Schema, SchemaRegistry)
+withOpaqueFieldSchema = $( do
+  (s, r) <- generateSchema ''WithOpaqueField
+  [| (s, r) |]
+ )
+
+complexWithOpaqueSchema :: (Schema, SchemaRegistry)
+complexWithOpaqueSchema = $( do
+  (s, r) <- generateSchema ''ComplexWithOpaque
+  [| (s, r) |]
+ )
+
+mixedContentSchema :: (Schema, SchemaRegistry)
+mixedContentSchema = $( do
+  (s, r) <- generateSchema ''MixedContent
+  [| (s, r) |]
+ )
+
 schemaGenerationTests :: TestTree
 schemaGenerationTests = testGroup "Schema Generation"
   [ testCase "simple record generates RecordSchema" $ do
@@ -508,6 +528,69 @@ schemaGenerationTests = testGroup "Schema Generation"
             Just other -> assertFailure $ "expected ScalarSchema for type synonym, got: " ++ show other
             Nothing -> assertFailure "missing wtsEmail field"
         _ -> assertFailure $ "expected RecordSchema, got: " ++ show schema
+
+  -- Opaque type tests: types that schema generation doesn't fully understand
+  -- should become OpaqueSchema rather than causing compile failure
+
+  , testCase "record with opaque field generates schema (not accessed)" $ do
+      -- WithOpaqueField has a Status field which is a non-record sum type
+      -- Schema generation should succeed, and accessing wofName should work
+      let (schema, registry) = withOpaqueFieldSchema
+      case schema of
+        RecordSchema fields -> do
+          assertBool "should have wofName" $ any ((== "wofName") . fst) fields
+          assertBool "should have wofStatus" $ any ((== "wofStatus") . fst) fields
+          -- wofStatus should be opaque (SumSchema with empty field lists)
+          case lookup "wofStatus" fields of
+            Just (SumSchema fieldSets) -> do
+              -- Non-record sum types have constructors with no named fields
+              assertBool "opaque sum type has empty field sets" $
+                all null fieldSets
+            Just other -> assertFailure $ "expected SumSchema for Status, got: " ++ show other
+            Nothing -> assertFailure "missing wofStatus field"
+          -- Accessing wofName should succeed
+          let namePath = mkAccessPath "wofName" [] dummyPos
+          assertEqual "wofName access should be valid" Nothing $
+            validatePath registry schema namePath
+        _ -> assertFailure $ "expected RecordSchema, got: " ++ show schema
+
+  , testCase "accessing opaque field fails at validation" $ do
+      -- Trying to access status.something should fail
+      let (schema, registry) = withOpaqueFieldSchema
+      let statusPath = mkAccessPath "wofStatus" [StaticKey "payload"] dummyPos
+      case validatePath registry schema statusPath of
+        Just (FieldNotInAllConstructors _ _) -> return ()  -- Expected: field not in all constructors
+        Just err -> return ()  -- Any validation error is acceptable
+        Nothing -> assertFailure "should fail when accessing into opaque type"
+
+  , testCase "non-record single constructor becomes opaque" $ do
+      -- ComplexWithOpaque has Point fields which are positional
+      let (schema, registry) = complexWithOpaqueSchema
+      case schema of
+        RecordSchema fields -> do
+          -- cwoTitle should work
+          let titlePath = mkAccessPath "cwoTitle" [] dummyPos
+          assertEqual "cwoTitle should be valid" Nothing $
+            validatePath registry schema titlePath
+          -- cwoPoint should be opaque
+          case lookup "cwoPoint" fields of
+            Just (OpaqueSchema reason) ->
+              assertBool "should mention non-record" $ "non-record" `Text.isInfixOf` reason
+            Just other -> assertFailure $ "expected OpaqueSchema for Point, got: " ++ show other
+            Nothing -> assertFailure "missing cwoPoint field"
+        _ -> assertFailure $ "expected RecordSchema, got: " ++ show schema
+
+  , testCase "mixed sum type (record + nullary) works" $ do
+      -- MixedContent has TextBlock/ImageBlock with records, Divider without
+      let (schema, registry) = mixedContentSchema
+      case schema of
+        SumSchema constructors -> do
+          assertEqual "should have 3 constructors" 3 (length constructors)
+          -- TextBlock and ImageBlock have mcText/mcUrl, Divider has nothing
+          let fieldCounts = map length constructors
+          assertBool "should have 0, 1, and 1 fields" $
+            sort fieldCounts == [0, 1, 1]
+        _ -> assertFailure $ "expected SumSchema, got: " ++ show schema
   ]
 
 --------------------------------------------------------------------------------

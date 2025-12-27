@@ -41,6 +41,7 @@ lookupRoot :: SchemaRegistry -> Text -> Schema -> Bool -> Maybe Schema
 lookupRoot registry name schema isGuarded = case resolveSchema registry schema of
   RecordSchema fields -> lookup name fields
   SumSchema constructors -> lookupSumField name constructors isGuarded
+  OpaqueSchema _ -> Nothing  -- Can't look up fields in opaque types
   _ -> Nothing  -- Can't look up in List, Scalar, or unresolved RecursiveRef
 
 -- | Resolve a RecursiveRef to its actual schema.
@@ -123,6 +124,11 @@ validateSegments registry schema (seg:rest) access =
     (ScalarSchema, _) ->
       Just $ AccessOnScalar access
 
+    -- Opaque type with any key access - NOT ALLOWED
+    -- This only triggers if the template actually tries to access through it
+    (OpaqueSchema reason, _) ->
+      Just $ AccessOnOpaqueType access reason
+
     -- RecursiveRef that couldn't be resolved (shouldn't happen)
     (RecursiveRef _, _) ->
       Just $ UnknownType access "unresolved recursive reference"
@@ -157,6 +163,14 @@ formatValidationError err = case err of
     formatLocation (apSourcePos access) ++
     "  Error: Unknown type '" ++ Text.unpack typeName ++ "'\n" ++
     "  In access: " ++ formatAccessPath access ++ "\n"
+
+  AccessOnOpaqueType access reason ->
+    formatLocation (apSourcePos access) ++
+    "  Error: Cannot access field on opaque type\n" ++
+    "  Reason: " ++ Text.unpack reason ++ "\n" ++
+    "  In access: " ++ formatAccessPath access ++ "\n" ++
+    "  Hint: This type is not template-friendly. Either avoid accessing it,\n" ++
+    "        or refactor it to use record syntax with named fields.\n"
 
 -- | Format multiple validation errors.
 formatValidationErrors :: [ValidationError] -> String

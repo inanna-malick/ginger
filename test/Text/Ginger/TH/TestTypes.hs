@@ -66,3 +66,37 @@ data WithTypeSynonym = WithTypeSynonym
   { wtsEmail :: Email
   , wtsName :: Text
   } deriving (Show, Eq, Generic)
+
+-- | Non-record sum type (no named fields)
+-- This is opaque because it uses positional constructors
+data Status
+  = Active
+  | Inactive
+  | Pending Int  -- with payload
+  deriving (Show, Eq, Generic)
+
+-- | Record with an opaque nested type
+-- The template should be able to access `name` but not `status.payload` etc.
+data WithOpaqueField = WithOpaqueField
+  { wofName :: Text
+  , wofStatus :: Status  -- opaque: non-record sum type
+  } deriving (Show, Eq, Generic)
+
+-- | Non-record single constructor (positional)
+data Point = Point Int Int
+  deriving (Show, Eq, Generic)
+
+-- | Record with multiple opaque nested types
+data ComplexWithOpaque = ComplexWithOpaque
+  { cwoTitle :: Text
+  , cwoPoint :: Point          -- opaque: positional constructor
+  , cwoMaybePoint :: Maybe Point  -- Maybe wraps opaque
+  , cwoPoints :: [Point]       -- list of opaque
+  } deriving (Show, Eq, Generic)
+
+-- | Mixed sum type: some constructors have records, some don't
+data MixedContent
+  = TextBlock { mcText :: Text }
+  | ImageBlock { mcUrl :: Text }
+  | Divider  -- nullary, no fields
+  deriving (Show, Eq, Generic)
