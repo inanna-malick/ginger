@@ -55,6 +55,7 @@ module Text.Ginger.TH
 
 import Control.Monad (when)
 import Data.IORef
+import Data.Maybe (catMaybes, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Language.Haskell.TH
@@ -75,7 +76,7 @@ import Text.Ginger.TH.Types
 import Text.Ginger.TH.Builtins (isBuiltin)
 import Text.Ginger.TH.Extract (extractFromTemplate)
 import Text.Ginger.TH.Schema (generateSchema, SchemaRegistry)
-import Text.Ginger.TH.Validate (validatePaths, formatValidationErrors)
+import Text.Ginger.TH.Validate (validatePaths, formatValidationErrorsWithSource)
 
 -- | Load and type-check a template from a file at compile time.
 --
@@ -143,7 +144,7 @@ validateAndEmbedWithResolver typeName mPath src resolver = do
   parseResult <- runIO $ parseGinger' opts src
 
   template <- case parseResult of
-    Left err -> fail $ formatParserError mPath err
+    Left err -> fail $ formatParserErrorWithSource mPath src err
     Right tpl -> return tpl
 
   -- Generate schema from the Haskell type
@@ -160,7 +161,7 @@ validateAndEmbedWithResolver typeName mPath src resolver = do
 
   -- Report errors or generate code
   when (not $ null errors) $
-    fail $ formatValidationErrors errors
+    fail $ formatValidationErrorsWithSource src errors
 
   -- Generate code that parses the template at runtime
   -- We embed the source and parse at module load time
@@ -188,15 +189,39 @@ ioResolver baseDir includedFilesRef path = do
       return $ Just content
     else return Nothing
 
--- | Format a parser error for display with line/column information.
-formatParserError :: Maybe FilePath -> ParserError -> String
-formatParserError mPath err =
-  "Template parse error" ++ pathSuffix ++ positionSuffix ++ ":\n" ++ peErrorMessage err
+-- | Format a parser error with source context (Rust-style).
+formatParserErrorWithSource :: Maybe FilePath -> String -> ParserError -> String
+formatParserErrorWithSource mPath src err =
+  unlines $ catMaybes
+    [ Just $ "error: Template parse error" ++ pathSuffix
+    , locationLine
+    , Just "   |"
+    , sourceLine'
+    , caretLine
+    , Just "   |"
+    , Just $ "   = " ++ peErrorMessage err
+    ]
   where
     pathSuffix = maybe "" (" in " ++) mPath
-    positionSuffix = case peSourcePosition err of
-      Just pos -> " at line " ++ show (sourceLine pos) ++ ", column " ++ show (sourceColumn pos)
-      Nothing -> ""
+    sourceLines = lines src
+
+    locationLine = do
+      pos <- peSourcePosition err
+      return $ "  --> " ++ maybe "<unknown>" id mPath ++ ":" ++
+               show (sourceLine pos) ++ ":" ++ show (sourceColumn pos)
+
+    sourceLine' = do
+      pos <- peSourcePosition err
+      let lineNum = sourceLine pos
+      line <- listToMaybe $ drop (lineNum - 1) sourceLines
+      return $ padLineNum lineNum ++ " | " ++ line
+
+    caretLine = do
+      pos <- peSourcePosition err
+      let col = sourceColumn pos
+      return $ "   | " ++ replicate (col - 1) ' ' ++ "^"
+
+    padLineNum n = let s = show n in replicate (3 - length s) ' ' ++ s
 
 -- | Parse a template at runtime. Used internally by generated code.
 -- This should not fail since we already validated at compile time.

@@ -5,12 +5,13 @@ module Text.Ginger.TH.Validate
   , validatePaths
   , formatValidationError
   , formatValidationErrors
+  , formatValidationErrorsWithSource
   , SchemaRegistry
   ) where
 
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (mapMaybe)
+import Data.Maybe (mapMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Text.Parsec.Pos (SourcePos, sourceName, sourceLine, sourceColumn)
@@ -218,6 +219,80 @@ formatValidationErrors [] = ""
 formatValidationErrors errors =
   "Template type checking failed:\n\n" ++
   concatMap formatValidationError errors
+
+-- | Format validation errors with source context (Rust-style).
+formatValidationErrorsWithSource :: String -> [ValidationError] -> String
+formatValidationErrorsWithSource _ [] = ""
+formatValidationErrorsWithSource src errors =
+  "Template type checking failed:\n\n" ++
+  concatMap (formatValidationErrorWithSource src) errors
+
+-- | Format a single validation error with source context.
+formatValidationErrorWithSource :: String -> ValidationError -> String
+formatValidationErrorWithSource src err =
+  let pos = getErrorPos err
+      sourceLines = lines src
+      lineNum = sourceLine pos
+      col = sourceColumn pos
+      maybeLine = listToMaybe $ drop (lineNum - 1) sourceLines
+  in unlines $
+    [ "error: " ++ getErrorMessage err
+    , "  --> " ++ sourceName pos ++ ":" ++ show lineNum ++ ":" ++ show col
+    , "   |"
+    ] ++
+    maybe [] (\line ->
+      [ padLineNum lineNum ++ " | " ++ line
+      , "   | " ++ replicate (col - 1) ' ' ++ "^"
+      ]) maybeLine ++
+    [ "   |"
+    , "   = in access: " ++ formatAccessPath (getErrorAccess err)
+    ] ++
+    getHints err
+  where
+    padLineNum n = let s = show n in replicate (3 - length s) ' ' ++ s
+
+-- | Get source position from validation error.
+getErrorPos :: ValidationError -> SourcePos
+getErrorPos (FieldNotFound access _) = apSourcePos access
+getErrorPos (FieldNotInAllConstructors access _) = apSourcePos access
+getErrorPos (DynamicAccessNotAllowed access) = apSourcePos access
+getErrorPos (AccessOnScalar access) = apSourcePos access
+getErrorPos (UnknownType access _) = apSourcePos access
+getErrorPos (AccessOnOpaqueType access _) = apSourcePos access
+
+-- | Get AccessPath from validation error.
+getErrorAccess :: ValidationError -> AccessPath
+getErrorAccess (FieldNotFound access _) = access
+getErrorAccess (FieldNotInAllConstructors access _) = access
+getErrorAccess (DynamicAccessNotAllowed access) = access
+getErrorAccess (AccessOnScalar access) = access
+getErrorAccess (UnknownType access _) = access
+getErrorAccess (AccessOnOpaqueType access _) = access
+
+-- | Get error message without location.
+getErrorMessage :: ValidationError -> String
+getErrorMessage (FieldNotFound _ field) =
+  "field '" ++ Text.unpack field ++ "' not found"
+getErrorMessage (FieldNotInAllConstructors _ field) =
+  "field '" ++ Text.unpack field ++ "' not in all constructors"
+getErrorMessage (DynamicAccessNotAllowed _) =
+  "dynamic key access [expr] not allowed"
+getErrorMessage (AccessOnScalar _) =
+  "cannot access field on scalar type"
+getErrorMessage (UnknownType _ typeName) =
+  "unknown type '" ++ Text.unpack typeName ++ "'"
+getErrorMessage (AccessOnOpaqueType _ _) =
+  "cannot access field on opaque type"
+
+-- | Get hint lines for an error.
+getHints :: ValidationError -> [String]
+getHints (FieldNotInAllConstructors _ _) =
+  ["   = hint: for sum types, fields must exist in ALL constructors"]
+getHints (DynamicAccessNotAllowed _) =
+  ["   = hint: use static access .field or [\"literal\"] instead"]
+getHints (AccessOnOpaqueType _ reason) =
+  ["   = reason: " ++ Text.unpack reason]
+getHints _ = []
 
 -- | Format an access path for error messages.
 formatAccessPath :: AccessPath -> String
