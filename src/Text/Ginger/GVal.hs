@@ -15,6 +15,8 @@
 -- to parametrize the values themselves over the carrier monad is because we
 -- want to support impure functions, which requires access to the underlying
 -- carrier monad (e.g. 'IO').
+--
+-- For generic sum type support, see "Text.Ginger.GVal.Generic".
 module Text.Ginger.GVal
 where
 

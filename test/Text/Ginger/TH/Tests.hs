@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 -- | Tests for the compile-time type-checked template system.
 module Text.Ginger.TH.Tests
   ( thTests
@@ -24,6 +25,8 @@ import Text.Ginger.TH.Builtins (isBuiltin, builtinNames)
 import Text.Ginger.TH.Extract (extractFromTemplate, extractVariableAccesses)
 import Text.Ginger.TH.Schema (generateSchema, SchemaRegistry)
 import Text.Ginger.TH.Validate (validatePath, validatePaths, formatValidationError)
+import Text.Ginger.GVal (GVal, ToGVal(..), asText, asBoolean, asLookup)
+import Text.Ginger.GVal.Generic (genericToGVal)
 
 -- Import test types from separate module (required for TH to see them)
 import Text.Ginger.TH.TestTypes
@@ -37,6 +40,7 @@ thTests = testGroup "Template Haskell Type Checking"
   , schemaGenerationTests
   , narrowingTests
   , endToEndTests
+  , genericToGValTests
   , propertyTests
   ]
 
@@ -771,6 +775,80 @@ endToEndTests = testGroup "End-to-End Validation"
       assertEqual "should be srName" "srName" (apRoot $ head userPaths)
       let errors = validatePaths registry schema userPaths
       assertEqual "should have no errors" [] errors
+  ]
+
+--------------------------------------------------------------------------------
+-- Generic ToGVal Tests
+--------------------------------------------------------------------------------
+
+-- ToGVal instances for test types using genericToGVal
+instance ToGVal m TestStatus where
+  toGVal = genericToGVal
+
+instance ToGVal m TestEvent where
+  toGVal = genericToGVal
+
+genericToGValTests :: TestTree
+genericToGValTests = testGroup "Generic ToGVal (Sum Types)"
+  [ testCase "single-field positional constructor" $ do
+      -- TestBlocked Text should unwrap the inner value
+      let gval = toGVal (TestBlocked "no funds") :: GVal IO
+      assertEqual "asText is constructor name" "TestBlocked" (asText gval)
+      assertBool "should be truthy" (asBoolean gval)
+      -- Lookup the constructor field
+      case asLookup gval of
+        Nothing -> assertFailure "should have asLookup"
+        Just lookupFn -> do
+          case lookupFn "TestBlocked" of
+            Just inner -> assertEqual "inner value" "no funds" (asText inner)
+            Nothing -> assertFailure "TestBlocked field should be defined"
+          case lookupFn "TestPursuing" of
+            Just _ -> assertFailure "TestPursuing should NOT be defined"
+            Nothing -> return ()  -- Expected
+
+  , testCase "single-field Int constructor" $ do
+      let gval = toGVal (TestPursuing 42) :: GVal IO
+      assertEqual "asText is constructor name" "TestPursuing" (asText gval)
+      assertBool "should be truthy" (asBoolean gval)
+      case asLookup gval >>= ($ "TestPursuing") of
+        Just inner -> assertEqual "inner value" "42" (asText inner)
+        Nothing -> assertFailure "TestPursuing field should be defined"
+
+  , testCase "nullary constructor" $ do
+      let gval = toGVal TestAchieved :: GVal IO
+      assertEqual "asText is constructor name" "TestAchieved" (asText gval)
+      assertBool "should be truthy" (asBoolean gval)
+      -- Nullary constructor should still have the field defined
+      case asLookup gval >>= ($ "TestAchieved") of
+        Just inner -> assertBool "inner should be truthy" (asBoolean inner)
+        Nothing -> assertFailure "TestAchieved field should be defined"
+
+  , testCase "record constructor with named fields" $ do
+      let gval = toGVal (TestAttack { teAttacker = "hero", teTarget = "villain" }) :: GVal IO
+      assertEqual "asText is constructor name" "TestAttack" (asText gval)
+      -- Access the nested record
+      case asLookup gval >>= ($ "TestAttack") of
+        Just inner -> do
+          case asLookup inner >>= ($ "teAttacker") of
+            Just attacker -> assertEqual "attacker" "hero" (asText attacker)
+            Nothing -> assertFailure "teAttacker should be defined"
+          case asLookup inner >>= ($ "teTarget") of
+            Just target -> assertEqual "target" "villain" (asText target)
+            Nothing -> assertFailure "teTarget should be defined"
+        Nothing -> assertFailure "TestAttack field should be defined"
+
+  , testCase "different constructor not defined" $ do
+      let gval = toGVal (TestHeal { teHealer = "cleric", teAmount = 50 }) :: GVal IO
+      assertEqual "asText is constructor name" "TestHeal" (asText gval)
+      -- TestAttack should NOT be defined
+      case asLookup gval >>= ($ "TestAttack") of
+        Just _ -> assertFailure "TestAttack should NOT be defined for Heal variant"
+        Nothing -> return ()  -- Expected
+
+  , testCase "nullary record constructor" $ do
+      let gval = toGVal TestWait :: GVal IO
+      assertEqual "asText is constructor name" "TestWait" (asText gval)
+      assertBool "should be truthy" (asBoolean gval)
   ]
 
 --------------------------------------------------------------------------------

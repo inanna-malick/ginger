@@ -100,3 +100,17 @@ data MixedContent
   | ImageBlock { mcUrl :: Text }
   | Divider  -- nullary, no fields
   deriving (Show, Eq, Generic)
+
+-- | For testing genericToGVal - simple sum type
+data TestStatus
+  = TestBlocked Text
+  | TestPursuing Int
+  | TestAchieved
+  deriving (Show, Eq, Generic)
+
+-- | For testing genericToGVal - record sum type
+data TestEvent
+  = TestAttack { teAttacker :: Text, teTarget :: Text }
+  | TestHeal { teHealer :: Text, teAmount :: Int }
+  | TestWait
+  deriving (Show, Eq, Generic)
