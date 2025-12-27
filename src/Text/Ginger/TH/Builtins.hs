@@ -88,6 +88,13 @@ builtinNames = Set.fromList
   , "throw"
   , "zip"
   , "zipwith"
+    -- Jinja2 compatibility filters
+  , "first"
+  , "last"
+  , "max"
+  , "min"
+  , "title"
+  , "trim"
     -- Tests/predicates
   , "in"
   , "escaped"

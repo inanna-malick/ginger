@@ -912,4 +912,45 @@ instance MonadFail FailToEither where
   fail = FailToEither . Left
   {-# INLINE fail #-}
 
+-- | Get the first element of a list, or Nothing
+listHead :: GVal m -> Maybe (GVal m)
+listHead g = asList g >>= headMay
+
+-- | Get the last element of a list, or Nothing
+listLast :: GVal m -> Maybe (GVal m)
+listLast g = asList g >>= lastMay
+  where
+    lastMay [] = Nothing
+    lastMay xs = Just (List.last xs)
+
+-- | Get the maximum value from a list
+gfnMax :: Monad m => Function m
+gfnMax args =
+    case args of
+        [(_, g)] ->
+            case asList g of
+                Just items -> return $ List.maximumBy compareGVal items
+                Nothing -> return def
+        _ ->
+            -- Multiple args: find max of all
+            let vals = fmap snd args
+            in return $ List.maximumBy compareGVal vals
+  where
+    compareGVal a b = Prelude.compare (asText a) (asText b)
+
+-- | Get the minimum value from a list
+gfnMin :: Monad m => Function m
+gfnMin args =
+    case args of
+        [(_, g)] ->
+            case asList g of
+                Just items -> return $ List.minimumBy compareGVal items
+                Nothing -> return def
+        _ ->
+            -- Multiple args: find min of all
+            let vals = fmap snd args
+            in return $ List.minimumBy compareGVal vals
+  where
+    compareGVal a b = Prelude.compare (asText a) (asText b)
+
 -- vim: sw=4 ts=4 expandtab

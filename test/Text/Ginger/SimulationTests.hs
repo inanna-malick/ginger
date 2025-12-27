@@ -897,6 +897,52 @@ simulationTests = testGroup "Simulation"
                   "{{ 'foo'|length }}"
                   "3"
             ]
+        , testGroup "\"first\""
+            [ testCase "first of list" $ do
+                mkTestHtml [] [] "{{ [1,2,3]|first }}" "1"
+            , testCase "first of empty list" $ do
+                mkTestHtml [] [] "{{ []|first }}" ""
+            , testCase "first of string list" $ do
+                mkTestHtml [] [] "{{ ['a','b','c']|first }}" "a"
+            ]
+        , testGroup "\"last\""
+            [ testCase "last of list" $ do
+                mkTestHtml [] [] "{{ [1,2,3]|last }}" "3"
+            , testCase "last of empty list" $ do
+                mkTestHtml [] [] "{{ []|last }}" ""
+            , testCase "last of string list" $ do
+                mkTestHtml [] [] "{{ ['a','b','c']|last }}" "c"
+            ]
+        , testGroup "\"max\""
+            [ testCase "max of list" $ do
+                mkTestHtml [] [] "{{ [1,3,2]|max }}" "3"
+            , testCase "max of strings" $ do
+                mkTestHtml [] [] "{{ ['a','c','b']|max }}" "c"
+            , testCase "max of args" $ do
+                mkTestHtml [] [] "{{ max(1,3,2) }}" "3"
+            ]
+        , testGroup "\"min\""
+            [ testCase "min of list" $ do
+                mkTestHtml [] [] "{{ [3,1,2]|min }}" "1"
+            , testCase "min of strings" $ do
+                mkTestHtml [] [] "{{ ['c','a','b']|min }}" "a"
+            , testCase "min of args" $ do
+                mkTestHtml [] [] "{{ min(3,1,2) }}" "1"
+            ]
+        , testGroup "\"title\""
+            [ testCase "title case" $ do
+                mkTestHtml [] [] "{{ 'hello world'|title }}" "Hello World"
+            , testCase "already title" $ do
+                mkTestHtml [] [] "{{ 'Hello World'|title }}" "Hello World"
+            ]
+        , testGroup "\"trim\""
+            [ testCase "trim whitespace" $ do
+                mkTestHtml [] [] "{{ '  hello  '|trim }}" "hello"
+            , testCase "trim already clean" $ do
+                mkTestHtml [] [] "{{ 'hello'|trim }}" "hello"
+            , testCase "trim newlines" $ do
+                mkTestHtml [] [] "{{ '\n hello \n'|trim }}" "hello"
+            ]
         -- \"modulo\"
         -- \"num\"
         -- TODO

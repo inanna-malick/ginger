@@ -204,6 +204,14 @@ defaultScope =
     , ("zip", fromFunction gfnZip)
     , ("zipwith", fromFunction gfnZipWith)
 
+    -- Jinja2 compatibility filters
+    , ("first", fromFunction . unaryFunc $ \g -> fromMaybe def (listHead g))
+    , ("last", fromFunction . unaryFunc $ \g -> fromMaybe def (listLast g))
+    , ("max", fromFunction gfnMax)
+    , ("min", fromFunction gfnMin)
+    , ("title", fromFunction . variadicStringFunc $ mconcat . Prelude.map Text.toTitle)
+    , ("trim", fromFunction . variadicStringFunc $ mconcat . Prelude.map Text.strip)
+
     -- Tests/predicates
 
     , ("in", fromFunction gfnIn)
