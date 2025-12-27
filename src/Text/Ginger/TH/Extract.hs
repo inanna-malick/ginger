@@ -145,7 +145,7 @@ walkExpression scope narrowed expr = case expr of
 
   VarE pos varName
     | varName `Set.member` scope -> return ()  -- Locally bound
-    | otherwise -> tell [AccessPath varName [] pos narrowed]  -- Free variable
+    | otherwise -> tell [AccessPath varName [] pos narrowed False]  -- Free variable
 
   ListE _ exprs ->
     mapM_ (walkExpression scope narrowed) exprs
@@ -158,7 +158,7 @@ walkExpression scope narrowed expr = case expr of
     case collectAccessPath expr of
       Just (rootVar, segments, rootPos)
         | rootVar `Set.notMember` scope ->
-            tell [AccessPath rootVar segments rootPos narrowed]
+            tell [AccessPath rootVar segments rootPos narrowed False]
         | otherwise ->
             -- Root is locally bound, but we should still walk
             -- for any dynamic key expressions
@@ -189,12 +189,18 @@ walkExpression scope narrowed expr = case expr of
     _ <- walkStatement scope narrowed stmt
     return ()
 
-  IsDefinedE _ _isDefined _innerExpr ->
-    -- Don't extract paths from inside IsDefinedE.
-    -- The inner expression is just being queried for existence, not accessed.
-    -- e.g., `x.field is defined` checks if field exists, doesn't use its value.
-    -- The runtime's checkExprDefined doesn't evaluate the expression.
-    return ()
+  IsDefinedE _ _isDefined innerExpr ->
+    -- Extract paths from IsDefinedE for validation, but mark them as existence checks.
+    -- The inner expression is queried for existence, not accessed for its value.
+    -- We validate the path prefix (all but last segment) to catch typos early.
+    -- e.g., `user.profile.name is defined` validates that user and user.profile exist.
+    case collectAccessPath innerExpr of
+      Just (rootVar, segments, rootPos)
+        | rootVar `Set.notMember` scope ->
+            -- Mark as existence check so validation only checks prefix
+            tell [AccessPath rootVar segments rootPos narrowed True]
+        | otherwise -> return ()  -- Root is locally bound
+      Nothing -> return ()  -- Complex expression, can't validate
 
 -- | Try to collect a chain of member lookups into a single AccessPath.
 -- Returns (rootVarName, pathSegments, rootPosition) if successful.

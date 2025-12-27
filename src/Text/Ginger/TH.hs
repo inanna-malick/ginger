@@ -54,6 +54,7 @@ module Text.Ginger.TH
   ) where
 
 import Control.Monad (when)
+import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Language.Haskell.TH
@@ -61,6 +62,8 @@ import Language.Haskell.TH.Syntax (addDependentFile)
 import Text.Parsec.Pos (SourcePos)
 import Data.Monoid ((<>))
 import Control.Monad.Writer (Writer)
+import System.Directory (doesFileExist)
+import System.FilePath (takeDirectory, (</>))
 
 import Text.Ginger.AST (Template)
 import Text.Ginger.GVal (ToGVal, GVal)
@@ -87,11 +90,12 @@ import Text.Ginger.TH.Validate (validatePaths, formatValidationErrors)
 -- This will:
 --
 -- 1. Read the template file at compile time
--- 2. Parse the template
--- 3. Extract all variable accesses from the template
+-- 2. Parse the template (including any @{% include %}@ directives)
+-- 3. Extract all variable accesses from the template and included templates
 -- 4. Generate a schema from the Haskell type
 -- 5. Validate that all accesses match the schema
 -- 6. Fail compilation with clear error messages if validation fails
+-- 7. Register all included files as dependencies (recompile if they change)
 --
 typedTemplateFile :: Name -> FilePath -> Q Exp
 typedTemplateFile typeName templatePath = do
@@ -101,10 +105,26 @@ typedTemplateFile typeName templatePath = do
   -- Read template source at compile time
   src <- runIO $ readFile templatePath
 
+  -- Track included files for dependency registration
+  includedFilesRef <- runIO $ newIORef []
+
+  -- Create a resolver that reads files relative to the template directory
+  let templateDir = takeDirectory templatePath
+  let resolver = ioResolver templateDir includedFilesRef
+
   -- Parse and validate
-  validateAndEmbed typeName (Just templatePath) src
+  result <- validateAndEmbedWithResolver typeName (Just templatePath) src resolver
+
+  -- Register all included files as dependencies
+  includedFiles <- runIO $ readIORef includedFilesRef
+  mapM_ addDependentFile includedFiles
+
+  return result
 
 -- | Type-check an inline template string at compile time.
+--
+-- Note: Inline templates do not support @{% include %}@ directives.
+-- Use 'typedTemplateFile' for templates with includes.
 --
 -- @
 -- myTemplate :: TypedTemplate MyContext SourcePos
@@ -112,14 +132,14 @@ typedTemplateFile typeName templatePath = do
 -- @
 --
 typedTemplate :: Name -> String -> Q Exp
-typedTemplate typeName src = validateAndEmbed typeName Nothing src
+typedTemplate typeName src = validateAndEmbedWithResolver typeName Nothing src nullResolver
 
--- | Internal: validate template and emit code.
-validateAndEmbed :: Name -> Maybe FilePath -> String -> Q Exp
-validateAndEmbed typeName mPath src = do
+-- | Internal: validate template and emit code with a custom resolver.
+validateAndEmbedWithResolver :: Name -> Maybe FilePath -> String -> (String -> IO (Maybe String)) -> Q Exp
+validateAndEmbedWithResolver typeName mPath src resolver = do
   -- Parse the template
   let sourceName = mPath
-  let opts = (mkParserOptions nullResolver) { poSourceName = sourceName }
+  let opts = (mkParserOptions resolver) { poSourceName = sourceName }
   parseResult <- runIO $ parseGinger' opts src
 
   template <- case parseResult of
@@ -150,9 +170,23 @@ validateAndEmbed typeName mPath src = do
 
   [| unsafeParseTemplate $pathLit $srcLit |]
 
--- | Null include resolver (no includes supported in type-checked templates for now).
+-- | Null include resolver (no includes supported for inline templates).
 nullResolver :: Monad m => String -> m (Maybe String)
 nullResolver _ = return Nothing
+
+-- | File-based include resolver for typedTemplateFile.
+-- Resolves includes relative to the base directory and tracks which files were included.
+ioResolver :: FilePath -> IORef [FilePath] -> String -> IO (Maybe String)
+ioResolver baseDir includedFilesRef path = do
+  let fullPath = baseDir </> path
+  exists <- doesFileExist fullPath
+  if exists
+    then do
+      -- Track this file for dependency registration
+      modifyIORef includedFilesRef (fullPath :)
+      content <- readFile fullPath
+      return $ Just content
+    else return Nothing
 
 -- | Format a parser error for display.
 formatParserError :: Maybe FilePath -> ParserError -> String

@@ -25,7 +25,7 @@ import Text.Ginger.TH.Builtins (isBuiltin, builtinNames)
 import Text.Ginger.TH.Extract (extractFromTemplate, extractVariableAccesses)
 import Text.Ginger.TH.Schema (generateSchema, SchemaRegistry)
 import Text.Ginger.TH.Validate (validatePath, validatePaths, formatValidationError)
-import Text.Ginger.GVal (GVal, ToGVal(..), asText, asBoolean, asLookup)
+import Text.Ginger.GVal (GVal, ToGVal(..), asText, asBoolean, asLookup, isNull)
 import Text.Ginger.GVal.Generic (genericToGVal)
 
 -- Import test types from separate module (required for TH to see them)
@@ -40,6 +40,7 @@ thTests = testGroup "Template Haskell Type Checking"
   , schemaGenerationTests
   , narrowingTests
   , endToEndTests
+  , includeValidationTests
   , genericToGValTests
   , propertyTests
   ]
@@ -304,7 +305,7 @@ validationTests = testGroup "Path Validation"
 
   , testCase "error formatting includes location" $ do
       let schema = RecordSchema [("name", ScalarSchema)]
-      let path = AccessPath "email" [] (newPos "test.html" 5 10) Set.empty
+      let path = AccessPath "email" [] (newPos "test.html" 5 10) Set.empty False
       case validatePath emptyRegistry schema path of
         Nothing -> assertFailure "should be invalid"
         Just err -> do
@@ -338,13 +339,24 @@ parseAndExtract src = do
 nullResolver :: Monad m => String -> m (Maybe String)
 nullResolver _ = return Nothing
 
+-- | Parse and extract from a file with include support.
+-- Uses a lookup table for includes (like simulation tests).
+parseAndExtractWithIncludes :: FilePath -> String -> [(FilePath, String)] -> IO [AccessPath]
+parseAndExtractWithIncludes sourcePath src includeLookup = do
+  let resolver path = return $ lookup path includeLookup
+  let opts = (mkParserOptions resolver) { poSourceName = Just sourcePath }
+  result <- parseGinger' opts src
+  case result of
+    Left err -> error $ "Parse error: " ++ show err
+    Right tpl -> return $ extractFromTemplate tpl
+
 -- | Dummy source position for testing.
 dummyPos :: SourcePos
 dummyPos = newPos "test" 1 1
 
 -- | Create an AccessPath with no narrowing context (for tests).
 mkAccessPath :: Text -> [PathSegment] -> SourcePos -> AccessPath
-mkAccessPath root segs pos = AccessPath root segs pos Set.empty
+mkAccessPath root segs pos = AccessPath root segs pos Set.empty False
 
 --------------------------------------------------------------------------------
 -- Schema Generation Tests (using compile-time TH)
@@ -636,12 +648,15 @@ narrowingTests = testGroup "Narrowing (is defined guards)"
       let (schema, registry) = contentTypeSchema
       paths <- parseAndExtract "{% if ctBody is defined %}{{ ctBody }}{% endif %}"
       let userPaths = filter (not . isBuiltin . apRoot) paths
-      -- ctBody is extracted only from the body (condition is just a query)
+      -- ctBody is extracted from condition (existence check) and body
       let ctBodyPaths = filter (\p -> apRoot p == "ctBody") userPaths
-      assertEqual "should have 1 ctBody path (body only)" 1 (length ctBodyPaths)
-      -- The body access should be narrowed
-      let narrowed = apNarrowed (head ctBodyPaths)
-      assertBool "ctBody should be narrowed" (not $ Set.null narrowed)
+      -- Now we extract 2 paths: one for the `is defined` check, one for the body access
+      assertEqual "should have 2 ctBody paths (condition + body)" 2 (length ctBodyPaths)
+      -- The body access (non-existence-check) should be narrowed
+      let bodyPaths = filter (not . apIsExistenceCheck) ctBodyPaths
+      assertEqual "should have 1 body path" 1 (length bodyPaths)
+      let narrowed = apNarrowed (head bodyPaths)
+      assertBool "ctBody body access should be narrowed" (not $ Set.null narrowed)
       -- Validation should succeed because the body access is guarded
       let errors = validatePaths registry schema userPaths
       assertEqual "should have no errors (guarded access)" [] errors
@@ -659,22 +674,27 @@ narrowingTests = testGroup "Narrowing (is defined guards)"
       -- x in else branch should be narrowed
       paths <- parseAndExtract "{% if x is undefined %}no{% else %}{{ x }}{% endif %}"
       let userPaths = filter (not . isBuiltin . apRoot) paths
-      -- Only the x in the else branch ({{ x }}) is extracted (condition is just a query)
       let xPaths = filter (\p -> apRoot p == "x") userPaths
-      assertEqual "should have 1 x path (else branch only)" 1 (length xPaths)
-      -- The else branch x should be narrowed (x is undefined -> x is defined in else)
-      let narrowed = apNarrowed (head xPaths)
+      -- Now we extract 2 paths: one for `is undefined` check, one for else branch
+      assertEqual "should have 2 x paths (condition + else branch)" 2 (length xPaths)
+      -- The else branch access (non-existence-check) should be narrowed
+      let bodyPaths = filter (not . apIsExistenceCheck) xPaths
+      assertEqual "should have 1 body path" 1 (length bodyPaths)
+      let narrowed = apNarrowed (head bodyPaths)
       assertBool "x in else branch should be narrowed" (not $ Set.null narrowed)
 
   , testCase "and narrows both sides" $ do
       -- {% if a is defined and b is defined %}{{ a }}{{ b }}{% endif %}
       paths <- parseAndExtract "{% if a is defined and b is defined %}{{ a }}{{ b }}{% endif %}"
       let userPaths = filter (not . isBuiltin . apRoot) paths
-      -- Only body accesses extracted (a and b from body, not from condition)
-      assertEqual "should have 2 paths (body only)" 2 (length userPaths)
+      -- Now we extract 4 paths: 2 for the condition checks, 2 for the body
+      assertEqual "should have 4 paths (2 condition + 2 body)" 4 (length userPaths)
+      -- Filter for non-existence-check paths (body only)
+      let bodyPaths = filter (not . apIsExistenceCheck) userPaths
+      assertEqual "should have 2 body paths" 2 (length bodyPaths)
       -- Both a and b in the body should be narrowed
-      let aPaths = filter (\p -> apRoot p == "a") userPaths
-      let bPaths = filter (\p -> apRoot p == "b") userPaths
+      let aPaths = filter (\p -> apRoot p == "a") bodyPaths
+      let bPaths = filter (\p -> apRoot p == "b") bodyPaths
       assertBool "a should be narrowed" (all (not . Set.null . apNarrowed) aPaths)
       assertBool "b should be narrowed" (all (not . Set.null . apNarrowed) bPaths)
 
@@ -683,21 +703,27 @@ narrowingTests = testGroup "Narrowing (is defined guards)"
       -- a in body should NOT be narrowed (could be undefined)
       paths <- parseAndExtract "{% if a is defined or b is defined %}{{ a }}{% endif %}"
       let userPaths = filter (not . isBuiltin . apRoot) paths
-      -- Only body access extracted (condition is query, not use)
-      assertEqual "should have 1 path (body only)" 1 (length userPaths)
+      -- Now we extract 3 paths: 2 for condition, 1 for body
+      assertEqual "should have 3 paths (2 condition + 1 body)" 3 (length userPaths)
+      -- Filter for body access
+      let bodyPaths = filter (not . apIsExistenceCheck) userPaths
+      assertEqual "should have 1 body path" 1 (length bodyPaths)
       -- The body 'a' should not be narrowed (or is conservative)
-      let narrowed = apNarrowed (head userPaths)
+      let narrowed = apNarrowed (head bodyPaths)
       assertBool "a should not be narrowed in or condition" (Set.null narrowed)
 
   , testCase "nested if accumulates narrowing" $ do
       -- {% if x is defined %}{% if y is defined %}{{ x }}{{ y }}{% endif %}{% endif %}
       paths <- parseAndExtract "{% if x is defined %}{% if y is defined %}{{ x }}{{ y }}{% endif %}{% endif %}"
       let userPaths = filter (not . isBuiltin . apRoot) paths
-      -- Only body accesses extracted
-      assertEqual "should have 2 paths (body only)" 2 (length userPaths)
+      -- Now we extract 4 paths: 2 for conditions, 2 for body
+      assertEqual "should have 4 paths (2 condition + 2 body)" 4 (length userPaths)
+      -- Filter for body accesses
+      let bodyPaths = filter (not . apIsExistenceCheck) userPaths
+      assertEqual "should have 2 body paths" 2 (length bodyPaths)
       -- x and y in innermost block should both be narrowed
-      let xPaths = filter (\p -> apRoot p == "x") userPaths
-      let yPaths = filter (\p -> apRoot p == "y") userPaths
+      let xPaths = filter (\p -> apRoot p == "x") bodyPaths
+      let yPaths = filter (\p -> apRoot p == "y") bodyPaths
       assertBool "x should be narrowed in nested block" (all (not . Set.null . apNarrowed) xPaths)
       assertBool "y should be narrowed in nested block" (all (not . Set.null . apNarrowed) yPaths)
 
@@ -705,10 +731,13 @@ narrowingTests = testGroup "Narrowing (is defined guards)"
       -- {{ x.field is defined ? x.field : "default" }}
       paths <- parseAndExtract "{{ x.field is defined ? x.field : \"default\" }}"
       let userPaths = filter (not . isBuiltin . apRoot) paths
-      -- Only true branch access extracted (condition is query)
-      assertEqual "should have 1 path (true branch only)" 1 (length userPaths)
+      -- Now we extract 2 paths: 1 for condition, 1 for true branch
+      assertEqual "should have 2 paths (condition + true branch)" 2 (length userPaths)
+      -- Filter for true branch access
+      let bodyPaths = filter (not . apIsExistenceCheck) userPaths
+      assertEqual "should have 1 body path" 1 (length bodyPaths)
       -- The true branch x.field should be narrowed
-      let narrowed = apNarrowed (head userPaths)
+      let narrowed = apNarrowed (head bodyPaths)
       assertBool "x.field in ternary true branch should be narrowed" (not $ Set.null narrowed)
 
   , testCase "not inverts narrowing" $ do
@@ -716,11 +745,11 @@ narrowingTests = testGroup "Narrowing (is defined guards)"
       -- same as x is defined
       paths <- parseAndExtract "{% if not (x is undefined) %}{{ x }}{% endif %}"
       let userPaths = filter (not . isBuiltin . apRoot) paths
-      -- The body 'x' should be narrowed
-      let xPaths = filter (\p -> apRoot p == "x") userPaths
-      assertBool "should have at least one x path" (not $ null xPaths)
+      -- Filter for body access
+      let bodyPaths = filter (not . apIsExistenceCheck) userPaths
+      assertBool "should have at least one body path" (not $ null bodyPaths)
       -- At least one x should be narrowed (the one in the body)
-      let hasNarrowed = any (not . Set.null . apNarrowed) xPaths
+      let hasNarrowed = any (not . Set.null . apNarrowed) bodyPaths
       assertBool "x should be narrowed (not undefined = defined)" hasNarrowed
 
   , testCase "prefix narrowing: parent guard covers child" $ do
@@ -728,9 +757,12 @@ narrowingTests = testGroup "Narrowing (is defined guards)"
       -- user.profile.name should be narrowed because user.profile is guarded
       paths <- parseAndExtract "{% if user.profile is defined %}{{ user.profile.name }}{% endif %}"
       let userPaths = filter (not . isBuiltin . apRoot) paths
-      -- Should have 1 path (user.profile.name in body)
-      assertEqual "should have 1 path" 1 (length userPaths)
-      let path = head userPaths
+      -- Now we extract 2 paths: 1 for condition, 1 for body
+      assertEqual "should have 2 paths (condition + body)" 2 (length userPaths)
+      -- Filter for body access
+      let bodyPaths = filter (not . apIsExistenceCheck) userPaths
+      assertEqual "should have 1 body path" 1 (length bodyPaths)
+      let path = head bodyPaths
       -- The path should be narrowed (prefix-based)
       assertBool "user.profile.name should be narrowed via prefix" (isNarrowedBy path)
 
@@ -739,25 +771,95 @@ narrowingTests = testGroup "Narrowing (is defined guards)"
       -- Exact match case
       paths <- parseAndExtract "{% if x.y is defined %}{{ x.y }}{% endif %}"
       let userPaths = filter (not . isBuiltin . apRoot) paths
-      assertEqual "should have 1 path" 1 (length userPaths)
-      assertBool "x.y should be narrowed (exact match)" (isNarrowedBy $ head userPaths)
+      -- Now we extract 2 paths: 1 for condition, 1 for body
+      assertEqual "should have 2 paths (condition + body)" 2 (length userPaths)
+      let bodyPaths = filter (not . apIsExistenceCheck) userPaths
+      assertEqual "should have 1 body path" 1 (length bodyPaths)
+      assertBool "x.y should be narrowed (exact match)" (isNarrowedBy $ head bodyPaths)
 
   , testCase "prefix narrowing: sibling not narrowed" $ do
       -- {% if user.profile is defined %}{{ user.other }}{% endif %}
       -- user.other should NOT be narrowed (different path)
       paths <- parseAndExtract "{% if user.profile is defined %}{{ user.other }}{% endif %}"
       let userPaths = filter (not . isBuiltin . apRoot) paths
-      assertEqual "should have 1 path" 1 (length userPaths)
+      -- Now we extract 2 paths: 1 for condition (user.profile), 1 for body (user.other)
+      assertEqual "should have 2 paths (condition + body)" 2 (length userPaths)
+      -- Filter for body access
+      let bodyPaths = filter (not . apIsExistenceCheck) userPaths
+      assertEqual "should have 1 body path" 1 (length bodyPaths)
       -- user.other is not narrowed because user.profile doesn't prefix it
-      assertBool "user.other should NOT be narrowed" (not $ isNarrowedBy $ head userPaths)
+      assertBool "user.other should NOT be narrowed" (not $ isNarrowedBy $ head bodyPaths)
 
   , testCase "prefix narrowing: root only narrows all children" $ do
       -- {% if user is defined %}{{ user.profile.name }}{% endif %}
       -- If the root is guarded, all accesses through it are safe
       paths <- parseAndExtract "{% if user is defined %}{{ user.profile.name }}{% endif %}"
       let userPaths = filter (not . isBuiltin . apRoot) paths
-      assertEqual "should have 1 path" 1 (length userPaths)
-      assertBool "user.profile.name should be narrowed via root" (isNarrowedBy $ head userPaths)
+      -- Now we extract 2 paths: 1 for condition, 1 for body
+      assertEqual "should have 2 paths (condition + body)" 2 (length userPaths)
+      -- Filter for body access
+      let bodyPaths = filter (not . apIsExistenceCheck) userPaths
+      assertEqual "should have 1 body path" 1 (length bodyPaths)
+      assertBool "user.profile.name should be narrowed via root" (isNarrowedBy $ head bodyPaths)
+
+  -- Tests for is defined prefix-only validation
+  , testCase "is defined: validates prefix, allows missing final segment" $ do
+      -- {% if user.profile.missing is defined %} should validate user and user.profile
+      -- but allow user.profile.missing to not exist (that's what we're checking)
+      let (schema, registry) = nestedRecordSchema
+      paths <- parseAndExtract "{% if nrUser.missing is defined %}yes{% endif %}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      -- The existence check path should be marked
+      let existencePaths = filter apIsExistenceCheck userPaths
+      assertEqual "should have 1 existence check path" 1 (length existencePaths)
+      -- Validation should succeed - nrUser exists, so prefix is valid
+      let errors = validatePaths registry schema existencePaths
+      assertEqual "should have no errors (prefix valid, final segment can be missing)" [] errors
+
+  , testCase "is defined: rejects invalid prefix" $ do
+      -- {% if invalid.field is defined %} should fail because "invalid" doesn't exist
+      let (schema, registry) = simpleRecordSchema
+      paths <- parseAndExtract "{% if invalid.field is defined %}yes{% endif %}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      let existencePaths = filter apIsExistenceCheck userPaths
+      assertEqual "should have 1 existence check path" 1 (length existencePaths)
+      -- Validation should fail - "invalid" is not in schema
+      let errors = validatePaths registry schema existencePaths
+      assertEqual "should have 1 error (invalid root)" 1 (length errors)
+
+  , testCase "is defined: root-only check always succeeds if root exists" $ do
+      -- {% if srName is defined %} should validate just that srName exists
+      let (schema, registry) = simpleRecordSchema
+      paths <- parseAndExtract "{% if srName is defined %}yes{% endif %}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      let existencePaths = filter apIsExistenceCheck userPaths
+      assertEqual "should have 1 existence check path" 1 (length existencePaths)
+      let errors = validatePaths registry schema existencePaths
+      assertEqual "should have no errors" [] errors
+
+  , testCase "is defined: root-only check with missing root is allowed" $ do
+      -- {% if missing is defined %} - checking if something exists at root level
+      -- For existence checks with no segments, we allow the root to be missing
+      let (schema, registry) = simpleRecordSchema
+      paths <- parseAndExtract "{% if missing is defined %}yes{% endif %}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      let existencePaths = filter apIsExistenceCheck userPaths
+      assertEqual "should have 1 existence check path" 1 (length existencePaths)
+      -- This should succeed - we're just checking if "missing" exists
+      let errors = validatePaths registry schema existencePaths
+      assertEqual "should have no errors (checking root existence)" [] errors
+
+  , testCase "is defined: deep prefix with valid path" $ do
+      -- {% if nrUser.srName.something is defined %} validates nrUser and nrUser.srName
+      let (schema, registry) = nestedRecordSchema
+      paths <- parseAndExtract "{% if nrUser.srName.something is defined %}yes{% endif %}"
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      let existencePaths = filter apIsExistenceCheck userPaths
+      assertEqual "should have 1 existence check path" 1 (length existencePaths)
+      -- Prefix (nrUser.srName) is valid, so no error
+      -- (Even though srName is a scalar and can't have .something, we only validate prefix)
+      let errors = validatePaths registry schema existencePaths
+      assertEqual "should have no errors (prefix valid)" [] errors
   ]
 
 --------------------------------------------------------------------------------
@@ -841,6 +943,73 @@ endToEndTests = testGroup "End-to-End Validation"
   ]
 
 --------------------------------------------------------------------------------
+-- Include Validation Tests
+--------------------------------------------------------------------------------
+
+includeValidationTests :: TestTree
+includeValidationTests = testGroup "Include Validation"
+  [ testCase "variables in included templates are extracted" $ do
+      -- Main template includes a partial that uses nrUser.srName
+      let mainSrc = "<h1>User</h1>{% include 'partials/user-info.html' %}<p>{{ nrActive }}</p>"
+      let partialSrc = "<span>{{ nrUser.srName }}</span>"
+      paths <- parseAndExtractWithIncludes
+        "main.html"
+        mainSrc
+        [("./partials/user-info.html", partialSrc)]
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      -- Should extract paths from both main and included template
+      let roots = Set.fromList $ map apRoot userPaths
+      assertBool "should have nrActive from main" (Set.member "nrActive" roots)
+      assertBool "should have nrUser from include" (Set.member "nrUser" roots)
+
+  , testCase "included template variables validated against schema" $ do
+      -- Test that validation catches errors in included templates
+      let (schema, registry) = nestedRecordSchema
+      let mainSrc = "{{ nrActive }}{% include 'partial.html' %}"
+      let partialSrc = "{{ nrUser.srName }}{{ invalidField }}"  -- invalidField doesn't exist
+      paths <- parseAndExtractWithIncludes
+        "main.html"
+        mainSrc
+        [("./partial.html", partialSrc)]
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      let errors = validatePaths registry schema userPaths
+      -- Should have 1 error for invalidField
+      assertEqual "should have 1 error" 1 (length errors)
+      case head errors of
+        FieldNotFound _ field -> assertEqual "should be invalidField" "invalidField" field
+        other -> assertFailure $ "wrong error type: " ++ show other
+
+  , testCase "nested includes extract variables from all levels" $ do
+      -- main includes header, header includes nav
+      let mainSrc = "{{ nrActive }}{% include 'header.html' %}"
+      let headerSrc = "Header{% include '../nav.html' %}"
+      let navSrc = "{{ nrUser.srName }}"
+      paths <- parseAndExtractWithIncludes
+        "templates/main.html"
+        mainSrc
+        [ ("./templates/header.html", headerSrc)
+        , ("./templates/../nav.html", navSrc)
+        ]
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      let roots = Set.fromList $ map apRoot userPaths
+      -- Should have paths from main and deeply nested include
+      assertBool "should have nrActive from main" (Set.member "nrActive" roots)
+      assertBool "should have nrUser from nav (2 levels deep)" (Set.member "nrUser" roots)
+
+  , testCase "valid template with includes passes validation" $ do
+      let (schema, registry) = nestedRecordSchema
+      let mainSrc = "<h1>{{ nrActive }}</h1>{% include 'user.html' %}"
+      let userSrc = "<span>{{ nrUser.srName }}</span><span>{{ nrUser.srAge }}</span>"
+      paths <- parseAndExtractWithIncludes
+        "main.html"
+        mainSrc
+        [("./user.html", userSrc)]
+      let userPaths = filter (not . isBuiltin . apRoot) paths
+      let errors = validatePaths registry schema userPaths
+      assertEqual "should have no errors" [] errors
+  ]
+
+--------------------------------------------------------------------------------
 -- Generic ToGVal Tests
 --------------------------------------------------------------------------------
 
@@ -851,8 +1020,15 @@ instance ToGVal m TestStatus where
 instance ToGVal m TestEvent where
   toGVal = genericToGVal
 
+-- Single-constructor record types (for testing flat field access)
+instance ToGVal m SimpleRecord where
+  toGVal = genericToGVal
+
+instance ToGVal m NestedRecord where
+  toGVal = genericToGVal
+
 genericToGValTests :: TestTree
-genericToGValTests = testGroup "Generic ToGVal (Sum Types)"
+genericToGValTests = testGroup "Generic ToGVal"
   [ testCase "single-field positional constructor" $ do
       -- TestBlocked Text should unwrap the inner value
       let gval = toGVal (TestBlocked "no funds") :: GVal IO
@@ -912,6 +1088,45 @@ genericToGValTests = testGroup "Generic ToGVal (Sum Types)"
       let gval = toGVal TestWait :: GVal IO
       assertEqual "asText is constructor name" "TestWait" (asText gval)
       assertBool "should be truthy" (asBoolean gval)
+
+  -- Single-constructor record tests (flat field access)
+  , testCase "single-constructor record has flat field access" $ do
+      let gval = toGVal (SimpleRecord { srName = "Alice", srAge = 30 }) :: GVal IO
+      assertBool "should be truthy" (asBoolean gval)
+      assertBool "should not be null" (not $ isNull gval)
+      -- Fields should be directly accessible (NOT wrapped in constructor name)
+      case asLookup gval of
+        Nothing -> assertFailure "should have asLookup"
+        Just lookupFn -> do
+          case lookupFn "srName" of
+            Just name -> assertEqual "name" "Alice" (asText name)
+            Nothing -> assertFailure "srName should be directly accessible"
+          case lookupFn "srAge" of
+            Just age -> assertEqual "age" "30" (asText age)
+            Nothing -> assertFailure "srAge should be directly accessible"
+          -- Constructor name should NOT be a field
+          case lookupFn "SimpleRecord" of
+            Just _ -> assertFailure "SimpleRecord should NOT be a field (flat access expected)"
+            Nothing -> return ()  -- Expected: no constructor wrapping
+
+  , testCase "nested single-constructor records have flat access" $ do
+      let inner = SimpleRecord { srName = "Bob", srAge = 25 }
+          gval = toGVal (NestedRecord { nrUser = inner, nrActive = True }) :: GVal IO
+      case asLookup gval of
+        Nothing -> assertFailure "should have asLookup"
+        Just lookupFn -> do
+          -- Top-level fields should be directly accessible
+          case lookupFn "nrActive" of
+            Just active -> assertBool "nrActive should be true" (asBoolean active)
+            Nothing -> assertFailure "nrActive should be directly accessible"
+          -- Nested record field should be accessible
+          case lookupFn "nrUser" of
+            Just userGval -> do
+              -- The nested record should also have flat access
+              case asLookup userGval >>= ($ "srName") of
+                Just name -> assertEqual "nested name" "Bob" (asText name)
+                Nothing -> assertFailure "nrUser.srName should be accessible"
+            Nothing -> assertFailure "nrUser should be directly accessible"
   ]
 
 --------------------------------------------------------------------------------
@@ -1024,7 +1239,8 @@ instance Arbitrary AccessPath where
     <*> resize 3 (listOf arbitrary)
     <*> pure dummyPos
     <*> pure Set.empty
+    <*> pure False
 
-  shrink (AccessPath root segs pos narrowed) =
-    [AccessPath root segs' pos narrowed | segs' <- shrink segs]
+  shrink (AccessPath root segs pos narrowed isCheck) =
+    [AccessPath root segs' pos narrowed isCheck | segs' <- shrink segs]
 

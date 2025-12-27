@@ -27,13 +27,25 @@ validatePaths registry schema = mapMaybe (validatePath registry schema)
 
 -- | Validate a single access path against a schema.
 -- Returns Nothing if valid, Just error if invalid.
+--
+-- For existence checks (paths inside @is defined@), we validate only the prefix
+-- (all but the last segment) because the final segment is what we're checking for.
 validatePath :: SchemaRegistry -> Schema -> AccessPath -> Maybe ValidationError
-validatePath registry schema access@(AccessPath root segments _ narrowed) =
+validatePath registry schema access@(AccessPath root segments _ narrowed isExistenceCheck) =
   -- Check if the full access path is guarded by an `is defined` check
   let isGuarded = isNarrowedBy access
+      -- For existence checks, validate only the prefix (drop last segment)
+      segmentsToValidate = if isExistenceCheck && not (null segments)
+                           then init segments
+                           else segments
   in case lookupRoot registry root schema isGuarded of
-       Nothing -> Just $ FieldNotFound access root
-       Just fieldSchema -> validateSegments registry fieldSchema segments access
+       Nothing ->
+         -- For existence checks with no segments, the root itself is being checked
+         -- So if it doesn't exist, that's OK - that's what we're checking
+         if isExistenceCheck && null segments
+         then Nothing
+         else Just $ FieldNotFound access root
+       Just fieldSchema -> validateSegments registry fieldSchema segmentsToValidate access
 
 -- | Look up a root variable in the schema.
 -- The isGuarded parameter indicates if the access is guarded by `is defined`.
@@ -209,7 +221,7 @@ formatValidationErrors errors =
 
 -- | Format an access path for error messages.
 formatAccessPath :: AccessPath -> String
-formatAccessPath (AccessPath root segments _ _) =
+formatAccessPath (AccessPath root segments _ _ _) =
   Text.unpack root ++ concatMap formatSegment segments
   where
     formatSegment (StaticKey k) = "." ++ Text.unpack k

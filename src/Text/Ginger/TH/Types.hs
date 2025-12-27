@@ -75,6 +75,10 @@ data AccessPath = AccessPath
     -- ^ Source position for error messages
   , apNarrowed :: Set NarrowedPath
     -- ^ Paths that have been narrowed (guarded by @is defined@) at this point
+  , apIsExistenceCheck :: Bool
+    -- ^ True if this path is inside an @is defined@ check.
+    -- For existence checks, we validate only the prefix (all but last segment)
+    -- because the final segment is what we're checking for existence.
   } deriving (Show, Eq, Data, Typeable)
 
 -- | A path that has been narrowed by an @is defined@ check.
@@ -87,9 +91,9 @@ data NarrowedPath = NarrowedPath
     -- ^ Path segments (without source position)
   } deriving (Show, Eq, Ord, Data, Typeable)
 
--- | Convert an AccessPath to a NarrowedPath (drops source position and narrowing context).
+-- | Convert an AccessPath to a NarrowedPath (drops source position and other context).
 toNarrowedPath :: AccessPath -> NarrowedPath
-toNarrowedPath (AccessPath root path _ _) = NarrowedPath root path
+toNarrowedPath (AccessPath root path _ _ _) = NarrowedPath root path
 
 -- | Check if an AccessPath is narrowed by one of the paths in the narrowing context.
 -- An access is considered narrowed if:
@@ -100,7 +104,7 @@ toNarrowedPath (AccessPath root path _ _) = NarrowedPath root path
 -- then @user.profile.name@ is also considered narrowed because if
 -- @user.profile@ exists, accessing @.name@ on it is safe.
 isNarrowedBy :: AccessPath -> Bool
-isNarrowedBy (AccessPath root path _ narrowed) =
+isNarrowedBy (AccessPath root path _ narrowed _) =
   any (isNarrowingPrefix root path) (Set.toList narrowed)
 
 -- | Check if a NarrowedPath is a prefix of (or equal to) the given access.

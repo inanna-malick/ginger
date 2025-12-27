@@ -319,7 +319,9 @@ includeTemplate sourceName = do
     currentSource <- fromMaybe "" <$> asks poSourceName
     let includeSourceName = takeDirectory currentSource </> sourceName
     opts <- ask
-    pres <- lift . lift $ parseGingerFile' opts includeSourceName
+    -- Update poSourceName so nested includes resolve relative to this file
+    let opts' = opts { poSourceName = Just includeSourceName }
+    pres <- lift . lift $ parseGingerFile' opts' includeSourceName
     case pres of
         Right t -> return t
         Left err -> fail (show err)

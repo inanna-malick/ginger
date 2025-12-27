@@ -1072,6 +1072,20 @@ simulationTests = testGroup "Simulation"
             mkTestHtml [] [("./features-included.html", "{% set user = 'foobar' %}")]
                 "{% include 'features-included.html' %}Hello, {{ user }}!"
                 "Hello, foobar!"
+        , testCase "nested includes with relative paths" $ do
+            -- Tests that nested includes resolve paths relative to the including file
+            -- main (in root) includes partials/header.html
+            -- partials/header.html includes ../footer.html
+            -- takeDirectory "main.html" = "." so first include path is "./partials/header.html"
+            -- takeDirectory "./partials/header.html" = "./partials"
+            -- "./partials" </> "../footer.html" = "./partials/../footer.html"
+            mkTestHtmlOpts (\o -> o { poSourceName = Just "main.html" })
+                []
+                [ ("./partials/header.html", "HEADER{% include '../footer.html' %}HEADER_END")
+                , ("./partials/../footer.html", "FOOTER")
+                ]
+                "{% include 'partials/header.html' %}"
+                "HEADERFOOTERHEADER_END"
         ]
     , testGroup "Explicit Local Scopes"
         [ testCase "baseline" $ do

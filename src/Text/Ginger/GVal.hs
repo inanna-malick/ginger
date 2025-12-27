@@ -333,11 +333,28 @@ matchFuncArgs names args =
         matched = HashMap.fromList $ fromPositional ++ fromNamed
         named = HashMap.difference namedRaw (HashMap.fromList fromNamed)
 
--- * Generic deriving support for sum types
+-- * Generic deriving support
 --
--- | Convert a value with a Generic instance to GVal using sum type representation.
+-- | Convert a value with a Generic instance to GVal.
 --
--- Sum types are represented as dictionaries where:
+-- Behavior depends on the type structure:
+--
+-- == Single-constructor types (records)
+--
+-- Fields are directly accessible without constructor wrapping:
+--
+-- @
+-- data User = User { userName :: Text, userAge :: Int }
+--   deriving (Generic)
+--
+-- instance ToGVal m User
+--
+-- -- Template: {{ userName }}, not {{ User.userName }}
+-- @
+--
+-- == Sum types (multiple constructors)
+--
+-- Constructor name becomes the lookup key, enabling pattern matching:
 --
 -- * Only the active constructor's field is defined
 -- * 'asText' returns the constructor name (for @==@ comparisons)
@@ -347,25 +364,14 @@ matchFuncArgs names args =
 -- * Multi-field record constructors create a nested dictionary
 -- * Multi-field positional constructors use @_0@, @_1@, etc.
 --
--- Usage (recommended pattern):
---
 -- @
--- {-# LANGUAGE DeriveGeneric #-}
--- {-# LANGUAGE FlexibleInstances #-}
--- {-# LANGUAGE MultiParamTypeClasses #-}
---
 -- data Status = Blocked String | Pursuing Int | Achieved
 --   deriving (Generic)
 --
--- -- Empty instance body uses the default implementation
 -- instance ToGVal m Status
--- @
 --
--- Or with explicit implementation:
---
--- @
--- instance ToGVal m Status where
---   toGVal = genericToGVal
+-- -- Template:
+-- -- {% if status.Blocked is defined %}Blocked: {{ status.Blocked }}{% endif %}
 -- @
 --
 genericToGVal :: (Generic a, GToGVal m (Rep a)) => a -> GVal m
@@ -375,11 +381,16 @@ genericToGVal = gToGVal . from
 class GToGVal m f where
   gToGVal :: f p -> GVal m
 
--- | Datatype metadata wrapper - just pass through
-instance GToGVal m f => GToGVal m (M1 D c f) where
+-- | Single-constructor datatype - unwrap directly without constructor name wrapping.
+-- This gives flat field access: {{ field }} instead of {{ Constructor.field }}
+instance {-# OVERLAPPING #-} GToGValInner m f => GToGVal m (M1 D d (M1 C c f)) where
+  gToGVal (M1 (M1 x)) = gToGValInner 0 x
+
+-- | Datatype metadata wrapper - pass through for sum types
+instance {-# OVERLAPPABLE #-} GToGVal m f => GToGVal m (M1 D c f) where
   gToGVal (M1 x) = gToGVal x
 
--- | Constructor wrapper - creates the constructor-as-field representation
+-- | Constructor wrapper - creates the constructor-as-field representation (for sum types)
 instance (GToGValInner m f, Constructor c) => GToGVal m (M1 C c f) where
   gToGVal m@(M1 x) =
     let cName = Text.pack $ conName m
