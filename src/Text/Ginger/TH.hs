@@ -67,7 +67,7 @@ import System.FilePath (takeDirectory, (</>))
 
 import Text.Ginger.AST (Template)
 import Text.Ginger.GVal (ToGVal, GVal)
-import Text.Ginger.Parse (parseGinger', ParserError(..), ParserOptions(..), mkParserOptions)
+import Text.Ginger.Parse (parseGinger', ParserError(..), ParserOptions(..), mkParserOptions, sourceLine, sourceColumn)
 import Text.Ginger.Run (easyRender, easyRenderM)
 import Text.Ginger.Run.Type (Run, ContextEncodable, RuntimeError)
 
@@ -188,12 +188,15 @@ ioResolver baseDir includedFilesRef path = do
       return $ Just content
     else return Nothing
 
--- | Format a parser error for display.
+-- | Format a parser error for display with line/column information.
 formatParserError :: Maybe FilePath -> ParserError -> String
 formatParserError mPath err =
-  "Template parse error" ++ pathSuffix ++ ":\n" ++ peErrorMessage err
+  "Template parse error" ++ pathSuffix ++ positionSuffix ++ ":\n" ++ peErrorMessage err
   where
     pathSuffix = maybe "" (" in " ++) mPath
+    positionSuffix = case peSourcePosition err of
+      Just pos -> " at line " ++ show (sourceLine pos) ++ ", column " ++ show (sourceColumn pos)
+      Nothing -> ""
 
 -- | Parse a template at runtime. Used internally by generated code.
 -- This should not fail since we already validated at compile time.
