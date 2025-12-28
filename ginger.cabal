@@ -52,6 +52,7 @@ library
                  , Text.Ginger.TH.Types
                  , Text.Ginger.TH.Builtins
                  , Text.Ginger.TH.Extract
+                 , Text.Ginger.TH.QuasiQuote
                  , Text.Ginger.TH.Schema
                  , Text.Ginger.TH.Validate
   -- other-modules:

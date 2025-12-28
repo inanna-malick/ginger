@@ -46,6 +46,8 @@ module Text.Ginger.TH
   ( -- * Template Haskell splices
     typedTemplateFile
   , typedTemplate
+    -- * QuasiQuoter
+  , jinja
     -- * Type-safe rendering
   , runTypedTemplate
   , runTypedTemplateM
@@ -75,6 +77,7 @@ import Text.Ginger.Run.Type (Run, ContextEncodable, RuntimeError)
 import Text.Ginger.TH.Types
 import Text.Ginger.TH.Builtins (isBuiltin)
 import Text.Ginger.TH.Extract (extractFromTemplate)
+import Text.Ginger.TH.QuasiQuote (jinja, jinjaRender)
 import Text.Ginger.TH.Schema (generateSchema, SchemaRegistry)
 import Text.Ginger.TH.Validate (validatePaths, formatValidationErrorsWithSource)
 

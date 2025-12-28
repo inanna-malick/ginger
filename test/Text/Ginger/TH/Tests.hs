@@ -1,7 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 -- | Tests for the compile-time type-checked template system.
 module Text.Ginger.TH.Tests
   ( thTests
@@ -20,6 +23,7 @@ import Text.Parsec.Pos (newPos, SourcePos)
 
 import Text.Ginger.AST
 import Text.Ginger.Parse (parseGinger', mkParserOptions, ParserOptions(..))
+import Text.Ginger.TH (jinja)
 import Text.Ginger.TH.Types
 import Text.Ginger.TH.Builtins (isBuiltin, builtinNames)
 import Text.Ginger.TH.Extract (extractFromTemplate, extractVariableAccesses)
@@ -42,6 +46,7 @@ thTests = testGroup "Template Haskell Type Checking"
   , endToEndTests
   , includeValidationTests
   , genericToGValTests
+  , quasiQuoterTests
   , propertyTests
   ]
 
@@ -1127,6 +1132,47 @@ genericToGValTests = testGroup "Generic ToGVal"
                 Just name -> assertEqual "nested name" "Bob" (asText name)
                 Nothing -> assertFailure "nrUser.srName should be accessible"
             Nothing -> assertFailure "nrUser should be directly accessible"
+  ]
+
+--------------------------------------------------------------------------------
+-- QuasiQuoter Tests
+--------------------------------------------------------------------------------
+
+quasiQuoterTests :: TestTree
+quasiQuoterTests = testGroup "QuasiQuoter"
+  [ testCase "jinja basic template" $ do
+      let name = "world" :: Text
+      let result :: Text = [jinja|Hello, {{ name }}!|]
+      assertEqual "renders correctly" "Hello, world!" result
+
+  , testCase "jinja as function" $ do
+      let greeting n = [jinja|Hello, {{ n }}!|] :: Text
+      assertEqual "renders correctly" "Hello, Alice!" (greeting ("Alice" :: Text))
+
+  , testCase "jinja multiple variables" $ do
+      let name = "Bob" :: Text
+          age = 30 :: Int
+      let result :: Text = [jinja|{{ name }} is {{ age }} years old|]
+      assertEqual "renders correctly" "Bob is 30 years old" result
+
+  , testCase "jinja with filters" $ do
+      let items = ["a", "b", "c"] :: [Text]
+      let result :: Text = [jinja|Count: {{ items | length }}|]
+      assertEqual "renders with filter" "Count: 3" result
+
+  , testCase "jinja with for loop" $ do
+      let items = ["x", "y", "z"] :: [Text]
+      let result :: Text = [jinja|{% for item in items %}{{ item }}{% endfor %}|]
+      assertEqual "renders loop" "xyz" result
+
+  , testCase "jinja with conditional" $ do
+      let active = True
+      let result :: Text = [jinja|{% if active %}yes{% else %}no{% endif %}|]
+      assertEqual "renders conditional" "yes" result
+
+  , testCase "jinja literal only" $ do
+      let result :: Text = [jinja|Hello, World!|]
+      assertEqual "renders literal" "Hello, World!" result
   ]
 
 --------------------------------------------------------------------------------
