@@ -1210,12 +1210,16 @@ testExprP = do
           -- "is not defined" = False, "is not undefined" = True
           let wantDefined = if negated then not testName else testName
           return $ \e -> IsDefinedE pos wantDefined e
-      -- Regular test: "is foo" becomes call to is_foo
+      -- Regular test: "is foo" becomes call to is_foo, "is not foo" negates the result
       regularTestP pos = do
+          negated <- option False (try $ keyword "not" >> spacesOrComment >> return True)
           funcName <- atomicExprP
           args <- choice [groupP "(" ")" funcArgP
                         , option [] $ funcArgP >>= (\a -> return [a])]
-          return $ \e -> CallE pos (addIsPrefix funcName) ((Nothing, e):args)
+          let testCall = \e -> CallE pos (addIsPrefix funcName) ((Nothing, e):args)
+          if negated
+              then return $ \e -> CallE pos (VarE pos "not") [(Nothing, testCall e)]
+              else return testCall
       addIsPrefix :: Expression a -> Expression a
       addIsPrefix expr = case expr of
                            (VarE a text) -> VarE a $ Text.append (Text.pack "is_") text

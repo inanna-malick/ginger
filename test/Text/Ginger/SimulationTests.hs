@@ -479,10 +479,14 @@ simulationTests = testGroup "Simulation"
         , testGroup "\"mapping\""
             [ testCase "dict is mapping" $ do
                 mkTestHtml [] [] "{% if {'a': 1} is mapping %}yes{% else %}no{% endif %}" "yes"
-            , testCase "list is not mapping" $ do
+            , testCase "list is not a mapping" $ do
                 mkTestHtml [] [] "{% if [1,2,3] is mapping %}yes{% else %}no{% endif %}" "no"
-            , testCase "string is not mapping" $ do
+            , testCase "string is not a mapping" $ do
                 mkTestHtml [] [] "{% if 'hello' is mapping %}yes{% else %}no{% endif %}" "no"
+            , testCase "is not mapping (negation syntax)" $ do
+                mkTestHtml [] [] "{% if [1,2,3] is not mapping %}yes{% else %}no{% endif %}" "yes"
+            , testCase "is not mapping (dict is mapping)" $ do
+                mkTestHtml [] [] "{% if {'a': 1} is not mapping %}yes{% else %}no{% endif %}" "no"
             ]
         , testGroup "\"none\""
             [ testCase "null is none" $ do
@@ -501,6 +505,8 @@ simulationTests = testGroup "Simulation"
                 mkTestHtml [] [] "{% if '123' is number %}yes{% else %}no{% endif %}" "yes"
             , testCase "non-numeric string is not number" $ do
                 mkTestHtml [] [] "{% if 'hello' is number %}yes{% else %}no{% endif %}" "no"
+            , testCase "is not number (negation syntax)" $ do
+                mkTestHtml [] [] "{% if 'hello' is not number %}yes{% else %}no{% endif %}" "yes"
             ]
         , testGroup "\"sequence\""
             [ testCase "list is sequence" $ do
