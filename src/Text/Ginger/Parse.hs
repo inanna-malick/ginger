@@ -1074,11 +1074,23 @@ pyTernaryTailP pos yesBranch = do
 booleanExprP :: Monad m => Parser m (Expression SourcePos)
 booleanExprP =
     operativeExprP
-        comparativeExprP
+        notExprP  -- Changed from comparativeExprP: not binds tighter than and/or
         [ ("or", "any")
         , ("||", "any")
         , ("and", "all")
         , ("&&", "all")
+        ]
+
+-- | The "not" prefix operator. In Jinja2, not has lower precedence than comparisons.
+-- So "not 1 == 2" means "not (1 == 2)", not "(not 1) == 2".
+notExprP :: Monad m => Parser m (Expression SourcePos)
+notExprP = do
+    pos <- getPosition
+    choice
+        [ try (keyword "not" >> spacesOrComment) >> do
+            arg <- notExprP  -- Allow chaining: "not not x"
+            return $ CallE pos (VarE pos "not") [(Nothing, arg)]
+        , comparativeExprP
         ]
 
 comparativeExprP :: Monad m => Parser m (Expression SourcePos)
@@ -1115,21 +1127,10 @@ multiplicativeExprP =
 postfixExprP :: Monad m => Parser m (Expression SourcePos)
 postfixExprP = do
     pos <- getPosition
-    base <- prefixExprP
+    base <- atomicExprP
     spacesOrComment
     postfixes <- many . try $ postfixP pos `before`spacesOrComment
     return $ foldl (flip ($)) base postfixes
-
--- | Prefix operators like "not"
-prefixExprP :: Monad m => Parser m (Expression SourcePos)
-prefixExprP = do
-    pos <- getPosition
-    choice
-        [ try (keyword "not" >> spacesOrComment) >> do
-            arg <- prefixExprP  -- Allow chaining: "not not x"
-            return $ CallE pos (VarE pos "not") [(Nothing, arg)]
-        , atomicExprP
-        ]
 
 postfixP :: Monad m => SourcePos -> Parser m ((Expression SourcePos) -> (Expression SourcePos))
 postfixP pos = dotPostfixP pos

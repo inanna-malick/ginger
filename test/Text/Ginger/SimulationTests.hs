@@ -236,6 +236,12 @@ simulationTests = testGroup "Simulation"
             mkTestHtml [] [] "{% if not not true %}yes{% endif %}" "yes"
         , testCase "not with and" $ do
             mkTestHtml [] [] "{% if not false and true %}yes{% endif %}" "yes"
+        , testCase "not with or" $ do
+            mkTestHtml [] [] "{% if not false or false %}yes{% endif %}" "yes"
+        , testCase "not in parens" $ do
+            mkTestHtml [] [] "{% if not (false and false) %}yes{% endif %}" "yes"
+        , testCase "not with comparison" $ do
+            mkTestHtml [] [] "{% if not 1 == 2 %}yes{% endif %}" "yes"
         ]
     , testGroup "Exceptions"
         [ testCase "try/catch, no exception" $ do
