@@ -118,7 +118,7 @@ import Data.Default (def)
 import Safe (readMay, lastDef, headMay)
 import Network.HTTP.Types (urlEncode)
 import Debug.Trace (trace)
-import Data.List (lookup, zipWith, unzip)
+import Data.List (lookup, zipWith, unzip, zip4)
 import Data.Monoid (Monoid (..), (<>))
 import Data.Aeson as JSON
 
@@ -470,28 +470,39 @@ runStatement' (ForS _ varNameIndex varNameValue itereeExpr body) = do
                 loop :: [(Maybe Text, GVal (Run p m h))] -> Run p m h (GVal (Run p m h))
                 loop [] = throwHere $ ArgumentsError (Just "loop") "at least one argument is required"
                 loop ((_, loopee):_) = go (Prelude.succ recursionDepth) loopee
-                iteration :: (Int, (GVal (Run p m h), GVal (Run p m h)))
+                -- Extract just the values for prev/next computation
+                values = Prelude.map snd iterPairs
+                -- Build prev/next lists (Nothing for first/last elements)
+                prevItems = Nothing : Prelude.map Just values
+                nextItems = Prelude.map Just (Prelude.drop 1 values) ++ [Nothing]
+                -- Zip everything together: (index, (key, value), maybePrev, maybeNext)
+                iterWithContext = zip4 [0..] iterPairs prevItems nextItems
+                iteration :: (Int, (GVal (Run p m h), GVal (Run p m h)), Maybe (GVal (Run p m h)), Maybe (GVal (Run p m h)))
                           -> Run p m h (GVal (Run p m h))
-                iteration (index, (key, value)) = do
+                iteration (index, (key, value), maybePrev, maybeNext) = do
                     setVar varNameValue value
                     setVar "loop" $
-                        (dict [ "index" ~> Prelude.succ index
-                             , "index0" ~> index
-                             , "revindex" ~> (numItems - index)
-                             , "revindex0" ~> (numItems - index - 1)
-                             , "depth" ~> Prelude.succ recursionDepth
-                             , "depth0" ~> recursionDepth
-                             , "first" ~> (index == 0)
-                             , "last" ~> (Prelude.succ index == numItems)
-                             , "length" ~> numItems
-                             , "cycle" ~> fromFunction (cycle index)
-                             ])
+                        (dict $ [ "index" ~> Prelude.succ index
+                                , "index0" ~> index
+                                , "revindex" ~> (numItems - index)
+                                , "revindex0" ~> (numItems - index - 1)
+                                , "depth" ~> Prelude.succ recursionDepth
+                                , "depth0" ~> recursionDepth
+                                , "first" ~> (index == 0)
+                                , "last" ~> (Prelude.succ index == numItems)
+                                , "length" ~> numItems
+                                , "cycle" ~> fromFunction (cycle index)
+                                ]
+                                -- Jinja2 parity: previtem/nextitem (undefined on first/last)
+                                ++ maybe [] (\p -> ["previtem" ~> p]) maybePrev
+                                ++ maybe [] (\n -> ["nextitem" ~> n]) maybeNext
+                        )
                              { asFunction = Just loop }
                     case varNameIndex of
                         Nothing -> return def
                         Just n -> setVar n key
                     runStatement body
-            (withLocalScope $ forM (Prelude.zip [0..] iterPairs) iteration) >>= \case
+            (withLocalScope $ forM iterWithContext iteration) >>= \case
                 [] -> return def
                 rvals -> return $ List.last rvals
     runExpression itereeExpr >>= go 0

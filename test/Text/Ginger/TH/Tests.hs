@@ -1173,6 +1173,45 @@ quasiQuoterTests = testGroup "QuasiQuoter"
   , testCase "jinja literal only" $ do
       let result :: Text = [jinja|Hello, World!|]
       assertEqual "renders literal" "Hello, World!" result
+
+  , testCase "jinja nested if/for/if with loop.last" $ do
+      let pool = [1, 2, 3] :: [Int]
+      let result :: Text = [jinja|{% if pool %}[{% for die in pool %}{{ die }}{% if not loop.last %}, {% endif %}{% endfor %}]{% else %}empty{% endif %}|]
+      assertEqual "renders nested" "[1, 2, 3]" result
+
+  -- Parser edge case tests via QuasiQuoter
+  , testCase "jinja deeply nested (4 levels)" $ do
+      let xs = [1] :: [Int]
+      let ys = [2] :: [Int]
+      let result :: Text = [jinja|{% if xs %}{% for x in xs %}{% if x == 1 %}{% for y in ys %}{{ x }}{{ y }}{% endfor %}{% endif %}{% endfor %}{% endif %}|]
+      assertEqual "renders deeply nested" "12" result
+
+  , testCase "jinja for with loop.first and loop.last" $ do
+      let items = [1, 2, 3] :: [Int]
+      let result :: Text = [jinja|{% for i in items %}{% if loop.first %}[{% endif %}{{ i }}{% if loop.last %}]{% else %},{% endif %}{% endfor %}|]
+      assertEqual "renders with loop vars" "[1,2,3]" result
+
+  , testCase "jinja multiple for loops in sequence" $ do
+      let as = [1, 2] :: [Int]
+      let bs = [3, 4] :: [Int]
+      let result :: Text = [jinja|{% for a in as %}{{ a }}{% endfor %}-{% for b in bs %}{{ b }}{% endfor %}|]
+      assertEqual "renders sequential fors" "12-34" result
+
+  , testCase "jinja nested for loops" $ do
+      let outer = [1, 2] :: [Int]
+      let inner = ["a", "b"] :: [Text]
+      let result :: Text = [jinja|{% for i in outer %}{% for j in inner %}{{ i }}{{ j }}{% endfor %}{% endfor %}|]
+      assertEqual "renders nested fors" "1a1b2a2b" result
+
+  , testCase "jinja for inside elif" $ do
+      let items = [1, 2] :: [Int]
+      let result :: Text = [jinja|{% if false %}no{% elif items %}{% for i in items %}{{ i }}{% endfor %}{% else %}no{% endif %}|]
+      assertEqual "renders for in elif" "12" result
+
+  , testCase "jinja for inside else" $ do
+      let items = [1, 2] :: [Int]
+      let result :: Text = [jinja|{% if false %}no{% else %}{% for i in items %}{{ i }}{% endfor %}{% endif %}|]
+      assertEqual "renders for in else" "12" result
   ]
 
 --------------------------------------------------------------------------------

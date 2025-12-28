@@ -242,6 +242,190 @@ simulationTests = testGroup "Simulation"
             mkTestHtml [] [] "{% if not (false and false) %}yes{% endif %}" "yes"
         , testCase "not with comparison" $ do
             mkTestHtml [] [] "{% if not 1 == 2 %}yes{% endif %}" "yes"
+        -- Nested control structure tests
+        , testCase "for inside if" $ do
+            mkTestHtml [] [] "{% if true %}{% for i in [1,2] %}{{ i }}{% endfor %}{% endif %}" "12"
+        , testCase "if inside for" $ do
+            mkTestHtml [] [] "{% for i in [1,2,3] %}{% if i == 2 %}*{% else %}{{ i }}{% endif %}{% endfor %}" "1*3"
+        , testCase "loop.last inside for inside if" $ do
+            mkTestHtml [] [] "{% if true %}{% for i in [1,2,3] %}{{ i }}{% if not loop.last %},{% endif %}{% endfor %}{% endif %}" "1,2,3"
+        , testCase "for inside if with literal and else" $ do
+            mkTestHtml [] [] "{% if true %}Prefix: [{% for i in [1,2] %}{{ i }}{% endfor %}]{% else %}Empty{% endif %}" "Prefix: [12]"
+        , testCase "complex nested: if/for/if with else branches" $ do
+            mkTestHtml [] []
+                "{% if true %}Items: [{% for i in [1,2,3] %}{{ i }}{% if not loop.last %}, {% endif %}{% endfor %}]{% else %}No items{% endif %}"
+                "Items: [1, 2, 3]"
+        -- Edge cases for nested control structures
+        , testCase "nested: false condition with for (else branch)" $ do
+            mkTestHtml [] []
+                "{% if false %}{% for i in [1,2] %}{{ i }}{% endfor %}{% else %}fallback{% endif %}"
+                "fallback"
+        , testCase "nested: deeply nested (3 levels)" $ do
+            mkTestHtml [] []
+                "{% if true %}{% for i in [1,2] %}{% if i == 1 %}a{% else %}b{% endif %}{% endfor %}{% endif %}"
+                "ab"
+        , testCase "nested: for with else inside if" $ do
+            mkTestHtml [] []
+                "{% if true %}{% for i in [] %}{{ i }}{% else %}empty{% endfor %}{% endif %}"
+                "empty"
+        , testCase "nested: multiple for loops inside if" $ do
+            mkTestHtml [] []
+                "{% if true %}{% for i in [1,2] %}{{ i }}{% endfor %}-{% for j in [3,4] %}{{ j }}{% endfor %}{% endif %}"
+                "12-34"
+        , testCase "nested: for inside elif" $ do
+            mkTestHtml [] []
+                "{% if false %}no{% elif true %}{% for i in [1,2] %}{{ i }}{% endfor %}{% else %}no{% endif %}"
+                "12"
+        , testCase "nested: for inside else" $ do
+            mkTestHtml [] []
+                "{% if false %}no{% else %}{% for i in [1,2] %}{{ i }}{% endfor %}{% endif %}"
+                "12"
+        , testCase "nested: for-for (nested loops)" $ do
+            mkTestHtml [] []
+                "{% for i in [1,2] %}{% for j in ['a','b'] %}{{ i }}{{ j }}{% endfor %}{% endfor %}"
+                "1a1b2a2b"
+        , testCase "nested: if-for-for-if" $ do
+            mkTestHtml [] []
+                "{% if true %}{% for i in [1,2] %}{% for j in [3,4] %}{% if i == j %}={% else %}{{ i }}{{ j }}{% endif %}{% endfor %}{% endfor %}{% endif %}"
+                "13142324"
+        , testCase "nested: loop.first and loop.last together" $ do
+            mkTestHtml [] []
+                "{% if true %}{% for i in [1,2,3] %}{% if loop.first %}[{% endif %}{{ i }}{% if loop.last %}]{% else %},{% endif %}{% endfor %}{% endif %}"
+                "[1,2,3]"
+        , testCase "nested: loop.index inside if" $ do
+            mkTestHtml [] []
+                "{% if true %}{% for i in ['a','b','c'] %}{% if loop.index == 2 %}*{% else %}{{ i }}{% endif %}{% endfor %}{% endif %}"
+                "a*c"
+        , testCase "nested: variable from outer scope in nested for" $ do
+            mkTestHtml [("prefix", toGVal ("@" :: Text))] []
+                "{% if prefix %}{% for i in [1,2] %}{{ prefix }}{{ i }}{% endfor %}{% endif %}"
+                "@1@2"
+        , testCase "nested: set inside for inside if" $ do
+            mkTestHtml [] []
+                "{% if true %}{% for i in [1,2] %}{% set x = i * 2 %}{{ x }}{% endfor %}{% endif %}"
+                "24"
+        , testCase "nested: whitespace in nested (default trim)" $ do
+            mkTestHtml [] []
+                "{% if true %}\n{% for i in [1] %}\n{{ i }}\n{% endfor %}\n{% endif %}"
+                "1\n"
+        , testCase "nested: immediate for after if open (no space)" $ do
+            mkTestHtml [] []
+                "{%if true%}{%for i in [1,2]%}{{i}}{%endfor%}{%endif%}"
+                "12"
+        , testCase "nested: for with filter inside if" $ do
+            mkTestHtml [] []
+                "{% if true %}{% for i in [1,2,3]|reverse %}{{ i }}{% endfor %}{% endif %}"
+                "321"
+        , testCase "nested: macro call inside for inside if" $ do
+            mkTestHtml [] []
+                "{% macro double(x) %}{{ x * 2 }}{% endmacro %}{% if true %}{% for i in [1,2] %}{{ double(i) }}{% endfor %}{% endif %}"
+                "24"
+        -- Parser stress tests
+        , testCase "nested: comment inside for inside if" $ do
+            mkTestHtml [] []
+                "{% if true %}{% for i in [1,2] %}{# comment #}{{ i }}{% endfor %}{% endif %}"
+                "12"
+        , testCase "nested: empty for body inside if" $ do
+            mkTestHtml [] []
+                "{% if true %}{% for i in [1,2] %}{% endfor %}done{% endif %}"
+                "done"
+        , testCase "nested: deeply nested (4 levels)" $ do
+            mkTestHtml [] []
+                "{% if true %}{% for i in [1] %}{% if i == 1 %}{% for j in [2] %}{{ i }}{{ j }}{% endfor %}{% endif %}{% endfor %}{% endif %}"
+                "12"
+        , testCase "nested: consecutive if blocks inside for" $ do
+            mkTestHtml [] []
+                "{% for i in [1,2,3] %}{% if i == 1 %}a{% endif %}{% if i == 2 %}b{% endif %}{% if i == 3 %}c{% endif %}{% endfor %}"
+                "abc"
+        , testCase "nested: for with break-like pattern (filtering)" $ do
+            mkTestHtml [] []
+                "{% for i in [1,2,3,4,5] %}{% if i <= 3 %}{{ i }}{% endif %}{% endfor %}"
+                "123"
+        , testCase "nested: text resembling tag inside if" $ do
+            mkTestHtml [] []
+                "{% if true %}{not a tag}{% endif %}"
+                "{not a tag}"
+        , testCase "nested: literal percent inside nested" $ do
+            mkTestHtml [] []
+                "{% if true %}{% for i in [1] %}100%{% endfor %}{% endif %}"
+                "100%"
+        , testCase "nested: literal braces inside nested" $ do
+            mkTestHtml [] []
+                "{% if true %}{% for i in [1] %}{literal}{% endfor %}{% endif %}"
+                "{literal}"
+        , testCase "nested: expression with nested structure keywords" $ do
+            mkTestHtml [] []
+                "{% if true %}{% for i in [1] %}{{ 'endif endfor' }}{% endfor %}{% endif %}"
+                "endif endfor"
+        , testCase "nested: back-to-back for loops inside if" $ do
+            mkTestHtml [] []
+                "{% if true %}{% for i in [1] %}a{% endfor %}{% for j in [2] %}b{% endfor %}{% endif %}"
+                "ab"
+        -- Jinja2 parity: loop variables
+        , testCase "nested: loop.index0 (zero-indexed)" $ do
+            mkTestHtml [] []
+                "{% for i in [1,2,3] %}{{ loop.index0 }}{% endfor %}"
+                "012"
+        , testCase "nested: loop.revindex (reverse 1-indexed)" $ do
+            mkTestHtml [] []
+                "{% for i in [1,2,3] %}{{ loop.revindex }}{% endfor %}"
+                "321"
+        , testCase "nested: loop.revindex0 (reverse 0-indexed)" $ do
+            mkTestHtml [] []
+                "{% for i in [1,2,3] %}{{ loop.revindex0 }}{% endfor %}"
+                "210"
+        , testCase "nested: loop.length" $ do
+            mkTestHtml [] []
+                "{% for i in [1,2,3,4,5] %}{% if loop.first %}{{ loop.length }}{% endif %}{% endfor %}"
+                "5"
+        -- Recursive loops in nested contexts
+        , testCase "nested: recursive for inside if" $ do
+            mkTestHtml [] []
+                "{% if true %}{% for k, v in {'a': {'b': null}} recursive %}{{ k }}({{ loop(v) }}){% endfor %}{% endif %}"
+                "a(b())"
+        -- Parser stress: whitespace control in nested
+        , testCase "nested: whitespace control with dash" $ do
+            mkTestHtml [] []
+                "{%- if true -%}{%- for i in [1] -%}{{ i }}{%- endfor -%}{%- endif -%}"
+                "1"
+        , testCase "nested: mixed whitespace control" $ do
+            mkTestHtml [] []
+                "{% if true -%}  {%- for i in [1] %}{{ i }}{% endfor -%}  {%- endif %}"
+                "1"
+        -- Real-world pattern: building CSV/JSON-like output
+        , testCase "nested: JSON array pattern" $ do
+            mkTestHtml [] []
+                "[{% for i in [1,2,3] %}{{ i }}{% if not loop.last %}, {% endif %}{% endfor %}]"
+                "[1, 2, 3]"
+        , testCase "nested: conditional formatting in loop" $ do
+            mkTestHtml [] []
+                "{% for i in [1,2,3,4,5] %}{% if i % 2 == 0 %}({{ i }}){% else %}{{ i }}{% endif %}{% endfor %}"
+                "1(2)3(4)5"
+        -- Jinja2 parity: loop.previtem and loop.nextitem
+        , testCase "loop.previtem (middle element)" $ do
+            mkTestHtml [] []
+                "{% for i in [1,2,3] %}{% if loop.previtem is defined %}prev={{ loop.previtem }}{% endif %}{% endfor %}"
+                "prev=1prev=2"
+        , testCase "loop.previtem (undefined on first)" $ do
+            mkTestHtml [] []
+                "{% for i in [1,2,3] %}{% if loop.first %}{% if loop.previtem is defined %}HAS{% else %}NO{% endif %}{% endif %}{% endfor %}"
+                "NO"
+        , testCase "loop.nextitem (middle elements)" $ do
+            mkTestHtml [] []
+                "{% for i in [1,2,3] %}{% if loop.nextitem is defined %}next={{ loop.nextitem }}{% endif %}{% endfor %}"
+                "next=2next=3"
+        , testCase "loop.nextitem (undefined on last)" $ do
+            mkTestHtml [] []
+                "{% for i in [1,2,3] %}{% if loop.last %}{% if loop.nextitem is defined %}HAS{% else %}NO{% endif %}{% endif %}{% endfor %}"
+                "NO"
+        , testCase "loop.previtem and nextitem together" $ do
+            mkTestHtml [] []
+                "{% for i in ['a','b','c'] %}{{ i }}:{% if loop.previtem is defined %}{{ loop.previtem }}{% else %}_{% endif %}/{% if loop.nextitem is defined %}{{ loop.nextitem }}{% else %}_{% endif %} {% endfor %}"
+                "a:_/b b:a/c c:b/_ "
+        , testCase "loop.previtem/nextitem with objects" $ do
+            mkTestHtml [] []
+                "{% for item in [{'n':1},{'n':2},{'n':3}] %}{% if loop.previtem is defined %}{{ loop.previtem.n }}{% endif %}{% endfor %}"
+                "12"
         ]
     , testGroup "Exceptions"
         [ testCase "try/catch, no exception" $ do
