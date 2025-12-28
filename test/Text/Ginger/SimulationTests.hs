@@ -527,6 +527,12 @@ simulationTests = testGroup "Simulation"
                 mkTestHtml [] [] "{% if 'Hello' is lower %}yes{% else %}no{% endif %}" "no"
             , testCase "uppercase string" $ do
                 mkTestHtml [] [] "{% if 'HELLO' is lower %}yes{% else %}no{% endif %}" "no"
+            , testCase "numeric string (no cased chars)" $ do
+                mkTestHtml [] [] "{% if '123' is lower %}yes{% else %}no{% endif %}" "no"
+            , testCase "empty string" $ do
+                mkTestHtml [] [] "{% if '' is lower %}yes{% else %}no{% endif %}" "no"
+            , testCase "mixed alpha-numeric" $ do
+                mkTestHtml [] [] "{% if 'abc123' is lower %}yes{% else %}no{% endif %}" "yes"
             ]
         , testGroup "\"upper\""
             [ testCase "uppercase string" $ do
@@ -535,6 +541,12 @@ simulationTests = testGroup "Simulation"
                 mkTestHtml [] [] "{% if 'Hello' is upper %}yes{% else %}no{% endif %}" "no"
             , testCase "lowercase string" $ do
                 mkTestHtml [] [] "{% if 'hello' is upper %}yes{% else %}no{% endif %}" "no"
+            , testCase "numeric string (no cased chars)" $ do
+                mkTestHtml [] [] "{% if '123' is upper %}yes{% else %}no{% endif %}" "no"
+            , testCase "empty string" $ do
+                mkTestHtml [] [] "{% if '' is upper %}yes{% else %}no{% endif %}" "no"
+            , testCase "mixed alpha-numeric" $ do
+                mkTestHtml [] [] "{% if 'ABC123' is upper %}yes{% else %}no{% endif %}" "yes"
             ]
         ]
    , testGroup "Built-in filters/functions"
@@ -904,6 +916,8 @@ simulationTests = testGroup "Simulation"
                 mkTestHtml [] [] "{{ []|first }}" ""
             , testCase "first of string list" $ do
                 mkTestHtml [] [] "{{ ['a','b','c']|first }}" "a"
+            , testCase "first of string (Jinja2: strings are iterable)" $ do
+                mkTestHtml [] [] "{{ 'hello'|first }}" "h"
             ]
         , testGroup "\"last\""
             [ testCase "last of list" $ do
@@ -912,6 +926,8 @@ simulationTests = testGroup "Simulation"
                 mkTestHtml [] [] "{{ []|last }}" ""
             , testCase "last of string list" $ do
                 mkTestHtml [] [] "{{ ['a','b','c']|last }}" "c"
+            , testCase "last of string (Jinja2: strings are iterable)" $ do
+                mkTestHtml [] [] "{{ 'hello'|last }}" "o"
             ]
         , testGroup "\"max\""
             [ testCase "max of list" $ do
@@ -924,6 +940,10 @@ simulationTests = testGroup "Simulation"
                 mkTestHtml [] [] "{{ [3,10,2]|max }}" "10"
             , testCase "max of empty list" $ do
                 mkTestHtml [] [] "{{ []|max }}" ""
+            , testCase "max with negative numbers" $ do
+                mkTestHtml [] [] "{{ [-5, 0, 5]|max }}" "5"
+            , testCase "max with floats" $ do
+                mkTestHtml [] [] "{{ [1.5, 0.5, 2.5]|max }}" "2.5"
             ]
         , testGroup "\"min\""
             [ testCase "min of list" $ do
@@ -936,12 +956,20 @@ simulationTests = testGroup "Simulation"
                 mkTestHtml [] [] "{{ [10,3,20]|min }}" "3"
             , testCase "min of empty list" $ do
                 mkTestHtml [] [] "{{ []|min }}" ""
+            , testCase "min with negative numbers" $ do
+                mkTestHtml [] [] "{{ [-5, 0, 5]|min }}" "-5"
+            , testCase "min with floats" $ do
+                mkTestHtml [] [] "{{ [1.5, 0.5, 2.5]|min }}" "0.5"
             ]
         , testGroup "\"title\""
             [ testCase "title case" $ do
                 mkTestHtml [] [] "{{ 'hello world'|title }}" "Hello World"
             , testCase "already title" $ do
                 mkTestHtml [] [] "{{ 'Hello World'|title }}" "Hello World"
+            , testCase "title with uppercase input" $ do
+                mkTestHtml [] [] "{{ 'HELLO WORLD'|title }}" "Hello World"
+            , testCase "title with mixed case" $ do
+                mkTestHtml [] [] "{{ 'hELLO wORLD'|title }}" "Hello World"
             ]
         , testGroup "\"trim\""
             [ testCase "trim whitespace" $ do
@@ -950,6 +978,10 @@ simulationTests = testGroup "Simulation"
                 mkTestHtml [] [] "{{ 'hello'|trim }}" "hello"
             , testCase "trim newlines" $ do
                 mkTestHtml [] [] "{{ '\n hello \n'|trim }}" "hello"
+            , testCase "trim tabs" $ do
+                mkTestHtml [] [] "{{ '\t hello \t'|trim }}" "hello"
+            , testCase "trim empty string" $ do
+                mkTestHtml [] [] "{{ ''|trim }}" ""
             ]
         -- \"modulo\"
         -- \"num\"

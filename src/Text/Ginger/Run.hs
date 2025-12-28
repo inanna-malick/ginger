@@ -100,6 +100,7 @@ import Control.Monad.Trans.Except (runExceptT, catchE)
 import Data.Text (Text)
 import Data.String (fromString)
 import qualified Data.Text as Text
+import qualified Data.Char as Char
 import qualified Data.ByteString.UTF8 as UTF8
 import Control.Monad
 import Control.Monad.Identity
@@ -233,8 +234,9 @@ defaultScope =
     -- parser (IsDefinedE), not as regular functions. See issue #33.
 
     -- Case predicates (for strings, prefixed with is_ for "x is foo" syntax)
-    , ("is_lower", fromFunction . unaryFunc $ toGVal . (\g -> asText g == Text.toLower (asText g) && not (Text.null (asText g))))
-    , ("is_upper", fromFunction . unaryFunc $ toGVal . (\g -> asText g == Text.toUpper (asText g) && not (Text.null (asText g))))
+    -- Jinja2 semantics: all cased chars must be lower/upper, AND at least one cased char must exist
+    , ("is_lower", fromFunction . unaryFunc $ toGVal . (\g -> let t = asText g in t == Text.toLower t && Text.any Char.isAlpha t))
+    , ("is_upper", fromFunction . unaryFunc $ toGVal . (\g -> let t = asText g in t == Text.toUpper t && Text.any Char.isAlpha t))
     ]
 
 -- | Check if a GVal is "stringy" - not null, not a list, not a dict, not a function,

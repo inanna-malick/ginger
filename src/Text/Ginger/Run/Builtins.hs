@@ -912,16 +912,26 @@ instance MonadFail FailToEither where
   fail = FailToEither . Left
   {-# INLINE fail #-}
 
--- | Get the first element of a list, or Nothing
+-- | Get the first element of a list, or first character of a string (Jinja2 compat)
 listHead :: GVal m -> Maybe (GVal m)
-listHead g = asList g >>= headMay
+listHead g = case asList g of
+    Just xs -> headMay xs
+    Nothing ->
+        -- Fall back to treating as string (Jinja2 treats strings as iterable)
+        case Text.uncons (asText g) of
+            Just (c, _) -> Just (toGVal c)
+            Nothing -> Nothing
 
--- | Get the last element of a list, or Nothing
+-- | Get the last element of a list, or last character of a string (Jinja2 compat)
 listLast :: GVal m -> Maybe (GVal m)
-listLast g = asList g >>= lastMay
-  where
-    lastMay [] = Nothing
-    lastMay xs = Just (List.last xs)
+listLast g = case asList g of
+    Just [] -> Nothing
+    Just xs -> Just (List.last xs)
+    Nothing ->
+        -- Fall back to treating as string (Jinja2 treats strings as iterable)
+        case Text.unsnoc (asText g) of
+            Just (_, c) -> Just (toGVal c)
+            Nothing -> Nothing
 
 -- | Get the maximum value from a list
 gfnMax :: Monad m => Function m
