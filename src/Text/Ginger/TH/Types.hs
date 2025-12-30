@@ -15,6 +15,10 @@ module Text.Ginger.TH.Types
   , ValidationError(..)
     -- * Typed template wrapper
   , TypedTemplate(..)
+    -- * Template dependencies
+  , TemplateDependency(..)
+  , absolutePaths
+  , relativePaths
   ) where
 
 import Data.Text (Text)
@@ -138,9 +142,31 @@ data ValidationError
     -- The Text describes why the type is opaque (e.g., "non-record sum type").
   deriving (Show, Eq, Data, Typeable)
 
+-- | A template dependency with both absolute and relative path forms.
+-- Used to track which files a template depends on (for file watching, etc.).
+data TemplateDependency = TemplateDependency
+  { depAbsolutePath :: FilePath
+    -- ^ Full filesystem path (canonicalized)
+  , depRelativePath :: FilePath
+    -- ^ Path as specified in the template or include directive
+  } deriving (Show, Eq, Data, Typeable, Lift)
+
 -- | A template that has been type-checked against a specific context type.
 -- The type parameter @a@ is the required context type.
 -- The type parameter @p@ is the source position type (usually 'SourcePos').
-newtype TypedTemplate a p = TypedTemplate
+data TypedTemplate a p = TypedTemplate
   { unTypedTemplate :: Template p
+    -- ^ The parsed template AST
+  , templateDependencies :: [TemplateDependency]
+    -- ^ All files this template depends on (root + transitive includes)
   } deriving (Show)
+
+-- | Get all absolute file paths this template depends on.
+-- Useful for file watching and hot-reload systems.
+absolutePaths :: TypedTemplate a p -> [FilePath]
+absolutePaths = map depAbsolutePath . templateDependencies
+
+-- | Get all relative file paths this template depends on.
+-- These are the paths as specified in the template source.
+relativePaths :: TypedTemplate a p -> [FilePath]
+relativePaths = map depRelativePath . templateDependencies

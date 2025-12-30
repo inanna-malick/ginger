@@ -42,6 +42,21 @@
 -- * Polymorphic types
 -- * Unknown types
 --
+-- = Dependency Tracking
+--
+-- Templates loaded with 'typedTemplateFile' track all file dependencies
+-- (the root template and all transitive includes). This enables:
+--
+-- * File watching for hot-reload systems
+-- * Build system integration
+-- * Template introspection
+--
+-- @
+-- -- Get all template dependencies at runtime:
+-- absolutePaths myTemplate  -- [\"/full/path/main.html\", \"/full/path/header.html\"]
+-- relativePaths myTemplate  -- [\"templates/main.html\", \"header.html\"]
+-- @
+--
 module Text.Ginger.TH
   ( -- * Template Haskell splices
     typedTemplateFile
@@ -51,8 +66,14 @@ module Text.Ginger.TH
     -- * Type-safe rendering
   , runTypedTemplate
   , runTypedTemplateM
-    -- * Re-exports
+    -- * Types
   , TypedTemplate(..)
+    -- * Dependency tracking
+    -- | Templates track their file dependencies (root + all includes).
+    -- Use these to implement file watching, hot-reload, or build integration.
+  , TemplateDependency(..)
+  , absolutePaths
+  , relativePaths
   ) where
 
 import Control.Monad (when)
@@ -61,11 +82,11 @@ import Data.Maybe (catMaybes, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Language.Haskell.TH
-import Language.Haskell.TH.Syntax (addDependentFile)
+import Language.Haskell.TH.Syntax (addDependentFile, lift)
 import Text.Parsec.Pos (SourcePos)
 import Data.Monoid ((<>))
 import Control.Monad.Writer (Writer)
-import System.Directory (doesFileExist)
+import System.Directory (doesFileExist, canonicalizePath)
 import System.FilePath (takeDirectory, (</>))
 
 import Text.Ginger.AST (Template)
@@ -112,18 +133,28 @@ typedTemplateFile typeName templatePath = do
   -- Track included files for dependency registration
   includedFilesRef <- runIO $ newIORef []
 
-  -- Create a resolver that reads files relative to the template directory
-  let templateDir = takeDirectory templatePath
-  let resolver = ioResolver templateDir includedFilesRef
+  -- Create a resolver that reads files
+  -- (the ginger parser computes include paths relative to the current template)
+  let resolver = ioResolver includedFilesRef
 
-  -- Parse and validate
-  result <- validateAndEmbedWithResolver typeName (Just templatePath) src resolver
+  -- Parse and validate (returns expression for parsed template)
+  templateExp <- validateAndEmbedWithResolver typeName (Just templatePath) src resolver
 
-  -- Register all included files as dependencies
-  includedFiles <- runIO $ readIORef includedFilesRef
-  mapM_ addDependentFile includedFiles
+  -- Get all included files
+  includedDeps <- runIO $ readIORef includedFilesRef
 
-  return result
+  -- Register all included files as GHC dependencies for recompilation
+  mapM_ (addDependentFile . depAbsolutePath) includedDeps
+
+  -- Build root dependency (the main template file)
+  rootAbsPath <- runIO $ canonicalizePath templatePath
+  let rootDep = TemplateDependency rootAbsPath templatePath
+  let allDeps = rootDep : includedDeps
+
+  -- Generate: TypedTemplate parsedTemplate [deps...]
+  -- Need to lift allDeps and combine with templateExp
+  depsExp <- lift allDeps
+  return $ AppE (AppE (ConE 'TypedTemplate) templateExp) depsExp
 
 -- | Type-check an inline template string at compile time.
 --
@@ -136,9 +167,14 @@ typedTemplateFile typeName templatePath = do
 -- @
 --
 typedTemplate :: Name -> String -> Q Exp
-typedTemplate typeName src = validateAndEmbedWithResolver typeName Nothing src nullResolver
+typedTemplate typeName src = do
+  templateExp <- validateAndEmbedWithResolver typeName Nothing src nullResolver
+  -- Inline templates have no file dependencies
+  emptyDepsExp <- lift ([] :: [TemplateDependency])
+  return $ AppE (AppE (ConE 'TypedTemplate) templateExp) emptyDepsExp
 
 -- | Internal: validate template and emit code with a custom resolver.
+-- Returns an expression that evaluates to @Template SourcePos@ (not TypedTemplate).
 validateAndEmbedWithResolver :: Name -> Maybe FilePath -> String -> (String -> IO (Maybe String)) -> Q Exp
 validateAndEmbedWithResolver typeName mPath src resolver = do
   -- Parse the template
@@ -172,23 +208,26 @@ validateAndEmbedWithResolver typeName mPath src resolver = do
   let srcLit = litE (stringL src)
   let pathLit = maybe [| Nothing |] (\p -> [| Just p |]) mPath
 
-  [| unsafeParseTemplate $pathLit $srcLit |]
+  [| unsafeParseTemplateRaw $pathLit $srcLit |]
 
 -- | Null include resolver (no includes supported for inline templates).
 nullResolver :: Monad m => String -> m (Maybe String)
 nullResolver _ = return Nothing
 
 -- | File-based include resolver for typedTemplateFile.
--- Resolves includes relative to the base directory and tracks which files were included.
-ioResolver :: FilePath -> IORef [FilePath] -> String -> IO (Maybe String)
-ioResolver baseDir includedFilesRef path = do
-  let fullPath = baseDir </> path
-  exists <- doesFileExist fullPath
+-- The ginger parser computes include paths relative to the current template,
+-- so this resolver receives paths that are ready to use directly.
+-- We track both absolute and relative paths for dependency tracking.
+ioResolver :: IORef [TemplateDependency] -> String -> IO (Maybe String)
+ioResolver includedFilesRef path = do
+  exists <- doesFileExist path
   if exists
     then do
-      -- Track this file for dependency registration
-      modifyIORef includedFilesRef (fullPath :)
-      content <- readFile fullPath
+      -- Canonicalize for absolute path, keep original for relative
+      absPath <- canonicalizePath path
+      let dep = TemplateDependency absPath path
+      modifyIORef includedFilesRef (dep :)
+      content <- readFile path
       return $ Just content
     else return Nothing
 
@@ -228,13 +267,14 @@ formatParserErrorWithSource mPath src err =
 
 -- | Parse a template at runtime. Used internally by generated code.
 -- This should not fail since we already validated at compile time.
-unsafeParseTemplate :: Maybe String -> String -> TypedTemplate a SourcePos
-unsafeParseTemplate mPath src =
+-- Returns the raw Template, which is then wrapped in TypedTemplate by the caller.
+unsafeParseTemplateRaw :: Maybe String -> String -> Template SourcePos
+unsafeParseTemplateRaw mPath src =
   let opts = (mkParserOptions nullResolver) { poSourceName = mPath }
       result = runIdentity $ parseGinger' opts src
   in case result of
        Left err -> error $ "BUG: Template that passed compile-time validation failed to parse at runtime: " ++ peErrorMessage err
-       Right tpl -> TypedTemplate tpl
+       Right tpl -> tpl
   where
     runIdentity :: Identity a -> a
     runIdentity (Identity a) = a
@@ -267,8 +307,8 @@ runTypedTemplate :: ( ContextEncodable h
                  => a
                  -> TypedTemplate a SourcePos
                  -> h
-runTypedTemplate context (TypedTemplate tpl) =
-  easyRender context tpl
+runTypedTemplate context typedTpl =
+  easyRender context (unTypedTemplate typedTpl)
 
 -- | Render a typed template in a monadic context.
 --
@@ -287,5 +327,5 @@ runTypedTemplateM :: ( Monad m
                   -> a
                   -> TypedTemplate a SourcePos
                   -> m (Either (RuntimeError SourcePos) (GVal (Run SourcePos m h)))
-runTypedTemplateM emit context (TypedTemplate tpl) =
-  easyRenderM emit context tpl
+runTypedTemplateM emit context typedTpl =
+  easyRenderM emit context (unTypedTemplate typedTpl)

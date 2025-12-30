@@ -114,3 +114,7 @@ data TestEvent
   | TestHeal { teHealer :: Text, teAmount :: Int }
   | TestWait
   deriving (Show, Eq, Generic)
+
+-- | Empty context type for testing templates that don't need context
+data EmptyContext = EmptyContext
+  deriving (Show, Eq, Generic)

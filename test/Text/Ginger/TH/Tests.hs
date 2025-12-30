@@ -14,7 +14,8 @@ import Test.Tasty
 import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck
 
-import Data.List (sort)
+import Control.Monad (forM_)
+import Data.List (sort, isSuffixOf)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Map.Strict as Map
@@ -23,7 +24,7 @@ import Text.Parsec.Pos (newPos, SourcePos)
 
 import Text.Ginger.AST
 import Text.Ginger.Parse (parseGinger', mkParserOptions, ParserOptions(..))
-import Text.Ginger.TH (jinja)
+import Text.Ginger.TH (jinja, typedTemplateFile, TypedTemplate(..), TemplateDependency(..), absolutePaths, relativePaths)
 import Text.Ginger.TH.Types
 import Text.Ginger.TH.Builtins (isBuiltin, builtinNames)
 import Text.Ginger.TH.Extract (extractFromTemplate, extractVariableAccesses)
@@ -47,6 +48,7 @@ thTests = testGroup "Template Haskell Type Checking"
   , includeValidationTests
   , genericToGValTests
   , quasiQuoterTests
+  , dependencyTests
   , propertyTests
   ]
 
@@ -1282,6 +1284,60 @@ prop_builtinFilterIdempotent names =
 prop_allBuiltinsRecognized :: Property
 prop_allBuiltinsRecognized =
   forAll (elements $ Set.toList builtinNames) isBuiltin
+
+--------------------------------------------------------------------------------
+-- Dependency Tracking Tests
+--------------------------------------------------------------------------------
+
+instance ToGVal m EmptyContext where
+  toGVal _ = toGVal ()
+
+-- Use TH to load templates at compile time
+simpleTemplate :: TypedTemplate EmptyContext SourcePos
+simpleTemplate = $(typedTemplateFile ''EmptyContext "test/templates/dep-simple.html")
+
+mainTemplate :: TypedTemplate EmptyContext SourcePos
+mainTemplate = $(typedTemplateFile ''EmptyContext "test/templates/dep-main.html")
+
+dependencyTests :: TestTree
+dependencyTests = testGroup "Dependency Tracking"
+  [ testCase "simple template has one dependency (itself)" $ do
+      let deps = templateDependencies simpleTemplate
+      assertEqual "should have 1 dependency" 1 (length deps)
+      let relPaths = relativePaths simpleTemplate
+      assertBool "relative path ends with dep-simple.html"
+        (any ("dep-simple.html" `isSuffixOf`) relPaths)
+
+  , testCase "template with includes has all dependencies" $ do
+      let deps = templateDependencies mainTemplate
+      -- main + partial + nested = 3 files
+      assertEqual "should have 3 dependencies" 3 (length deps)
+
+  , testCase "absolute paths are absolute" $ do
+      let absPaths = absolutePaths mainTemplate
+      assertBool "all absolute paths start with /"
+        (all (\p -> head p == '/') absPaths)
+
+  , testCase "relative paths preserve include paths" $ do
+      let relPaths = relativePaths mainTemplate
+      -- Main template path
+      assertBool "has main template" (any ("dep-main.html" `isSuffixOf`) relPaths)
+      -- Partial (included from main as 'dep-partial.html')
+      assertBool "has partial" (any ("dep-partial.html" `isSuffixOf`) relPaths)
+      -- Nested (included from partial as 'dep-nested.html')
+      assertBool "has nested" (any ("dep-nested.html" `isSuffixOf`) relPaths)
+
+  -- Note: jinja quasiquoter returns Text (rendered output), not TypedTemplate.
+  -- So we test inline templates via typedTemplate instead (can't use TH splice inline).
+  -- The typedTemplate function creates TypedTemplate with empty dependencies.
+  -- This is tested implicitly through the library implementation.
+
+  , testCase "TemplateDependency has both path forms" $ do
+      let deps = templateDependencies mainTemplate
+      forM_ deps $ \dep -> do
+        assertBool "absolute path is non-empty" (not $ null $ depAbsolutePath dep)
+        assertBool "relative path is non-empty" (not $ null $ depRelativePath dep)
+  ]
 
 --------------------------------------------------------------------------------
 -- Arbitrary Instances
