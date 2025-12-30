@@ -69,11 +69,12 @@ module Text.Ginger.TH
     -- * Types
   , TypedTemplate(..)
     -- * Dependency tracking
-    -- | Templates track their file dependencies (root + all includes).
+    -- | Templates track their file dependencies as a tree.
     -- Use these to implement file watching, hot-reload, or build integration.
   , TemplateDependency(..)
   , DepRelation(..)
   , DepLocation(..)
+  , flattenDeps
   , absolutePaths
   , relativePaths
     -- * Context type metadata
@@ -165,11 +166,11 @@ typedTemplateFile typeName templatePath = do
   when (not $ null errors) $
     fail $ formatValidationErrorsWithSource src errors
 
-  -- Extract dependencies with hierarchy from AST
-  allDeps <- runIO $ extractDependenciesFromAST templatePath template
+  -- Extract dependency tree from AST
+  depTree <- runIO $ extractDependenciesFromAST templatePath template
 
-  -- Register all with GHC for recompilation
-  mapM_ (addDependentFile . depAbsolutePath) allDeps
+  -- Register all files with GHC for recompilation
+  mapM_ (addDependentFile . depAbsolutePath) (flattenDeps depTree)
 
   -- Get context type metadata
   let simpleName = nameBase typeName
@@ -183,7 +184,7 @@ typedTemplateFile typeName templatePath = do
   let accessedFields = nub $ map formatAccessPath userAccesses
 
   -- Generate code (use lift + AppE pattern to avoid TH splice issues)
-  depsExp <- lift allDeps
+  depTreeExp <- lift depTree
   contextInfoExp <- lift contextInfo
   fieldsExp <- lift accessedFields
   let srcLit = litE (stringL src)
@@ -191,7 +192,7 @@ typedTemplateFile typeName templatePath = do
   templateExp <- [| unsafeParseTemplateRaw $pathLit $srcLit |]
 
   return $ foldl AppE (ConE 'TypedTemplate)
-    [templateExp, depsExp, contextInfoExp, fieldsExp]
+    [templateExp, depTreeExp, contextInfoExp, fieldsExp]
 
 -- | Type-check an inline template string at compile time.
 --
@@ -240,15 +241,22 @@ typedTemplate typeName src = do
   -- Get accessed fields
   let accessedFields = nub $ map formatAccessPath userAccesses
 
-  -- Inline templates have no file dependencies
-  emptyDepsExp <- lift ([] :: [TemplateDependency])
+  -- Inline templates have an empty dependency tree (no file, no children)
+  let emptyDepTree = TemplateDependency
+        { depAbsolutePath = "<inline>"
+        , depRelativePath = "<inline>"
+        , depRelation = Nothing
+        , depIncludeLocation = Nothing
+        , depChildren = []
+        }
+  depTreeExp <- lift emptyDepTree
   contextInfoExp <- lift contextInfo
   fieldsExp <- lift accessedFields
   let srcLit = litE (stringL src)
   templateExp <- [| unsafeParseTemplateRaw Nothing $srcLit |]
 
   return $ foldl AppE (ConE 'TypedTemplate)
-    [templateExp, emptyDepsExp, contextInfoExp, fieldsExp]
+    [templateExp, depTreeExp, contextInfoExp, fieldsExp]
 
 -- | Null include resolver (no includes supported for inline templates).
 nullResolver :: Monad m => String -> m (Maybe String)
@@ -262,36 +270,35 @@ formatAccessPath ap = Text.unpack (apRoot ap) ++
     formatSegment (StaticKey k) = "." ++ Text.unpack k
     formatSegment DynamicKey = "[*]"
 
--- | Extract dependencies with hierarchy from parsed template AST.
--- Walks the AST to find all includes and extends, tracking parent relationships.
-extractDependenciesFromAST :: FilePath -> Template SourcePos -> IO [TemplateDependency]
+-- | Extract dependency tree from parsed template AST.
+-- Returns the root node with children representing includes/extends.
+extractDependenciesFromAST :: FilePath -> Template SourcePos -> IO TemplateDependency
 extractDependenciesFromAST rootPath tpl = do
   rootAbs <- canonicalizePath rootPath
-  let rootDep = TemplateDependency
-        { depAbsolutePath = rootAbs
-        , depRelativePath = rootPath
-        , depIncludedBy = Nothing
-        , depRelation = Nothing
-        , depIncludeLocation = Nothing
-        }
 
   -- Get extends dependencies (from templateParent)
   extendsDeps <- case templateParent tpl of
     Nothing -> return []
-    Just parentTpl -> extractExtends rootAbs parentTpl
+    Just parentTpl -> extractExtends parentTpl
 
   -- Get include dependencies (from statements)
-  includeDeps <- walkStatement rootAbs (templateBody tpl)
+  includeDeps <- walkStatement (templateBody tpl)
 
   -- Also walk blocks (they may contain includes)
-  blockDeps <- concat <$> mapM (walkStatement rootAbs . blockBody)
+  blockDeps <- concat <$> mapM (walkStatement . blockBody)
                                 (HashMap.elems $ templateBlocks tpl)
 
-  return (rootDep : extendsDeps ++ includeDeps ++ blockDeps)
+  return TemplateDependency
+    { depAbsolutePath = rootAbs
+    , depRelativePath = rootPath
+    , depRelation = Nothing
+    , depIncludeLocation = Nothing
+    , depChildren = extendsDeps ++ includeDeps ++ blockDeps
+    }
 
 -- | Extract extends chain from templateParent
-extractExtends :: FilePath -> Template SourcePos -> IO [TemplateDependency]
-extractExtends childAbsPath parentTpl = do
+extractExtends :: Template SourcePos -> IO [TemplateDependency]
+extractExtends parentTpl = do
   let parentPath = getSourceFile (templateBody parentTpl)
   -- Check for "<<unknown>>" fallback
   if parentPath == "<<unknown>>" || null parentPath
@@ -299,54 +306,57 @@ extractExtends childAbsPath parentTpl = do
     else do
       parentAbs <- canonicalizePath parentPath
       let pos = annotation (templateBody parentTpl)
-      let dep = TemplateDependency
-            { depAbsolutePath = parentAbs
-            , depRelativePath = parentPath
-            , depIncludedBy = Just childAbsPath
-            , depRelation = Just DepExtended
-            , depIncludeLocation = Just $ posToDepLocation pos
-            }
-      -- Recurse for nested extends and includes in parent
-      nested <- extractDependenciesFromAST parentPath parentTpl
-      return (dep : tail nested)  -- tail to skip parent's root dep
 
--- | Walk all statement types to find includes
-walkStatement :: FilePath -> Statement SourcePos -> IO [TemplateDependency]
-walkStatement parentAbs stmt = case stmt of
+      -- Recursively get this parent's children
+      childTree <- extractDependenciesFromAST parentPath parentTpl
+
+      return [TemplateDependency
+        { depAbsolutePath = parentAbs
+        , depRelativePath = parentPath
+        , depRelation = Just DepExtended
+        , depIncludeLocation = Just $ posToDepLocation pos
+        , depChildren = depChildren childTree  -- inherit the children
+        }]
+
+-- | Walk all statement types to find includes (returns child nodes)
+walkStatement :: Statement SourcePos -> IO [TemplateDependency]
+walkStatement stmt = case stmt of
   PreprocessedIncludeS pos includedTpl -> do
     let childPath = getSourceFile (templateBody includedTpl)
     if childPath == "<<unknown>>" || null childPath
       then return []
       else do
         childAbs <- canonicalizePath childPath
-        let dep = TemplateDependency
-              { depAbsolutePath = childAbs
-              , depRelativePath = childPath
-              , depIncludedBy = Just parentAbs
-              , depRelation = Just DepIncluded
-              , depIncludeLocation = Just $ posToDepLocation pos
-              }
-        nested <- extractDependenciesFromAST childPath includedTpl
-        return (dep : tail nested)
+
+        -- Recursively get this include's children
+        childTree <- extractDependenciesFromAST childPath includedTpl
+
+        return [TemplateDependency
+          { depAbsolutePath = childAbs
+          , depRelativePath = childPath
+          , depRelation = Just DepIncluded
+          , depIncludeLocation = Just $ posToDepLocation pos
+          , depChildren = depChildren childTree  -- inherit the children
+          }]
 
   -- Statements with nested statements
-  MultiS _ stmts -> concat <$> mapM (walkStatement parentAbs) stmts
-  ScopedS _ body -> walkStatement parentAbs body
-  IndentS _ _ body -> walkStatement parentAbs body
+  MultiS _ stmts -> concat <$> mapM walkStatement stmts
+  ScopedS _ body -> walkStatement body
+  IndentS _ _ body -> walkStatement body
   IfS _ _ thenBranch elseBranch -> do
-    t <- walkStatement parentAbs thenBranch
-    e <- walkStatement parentAbs elseBranch
+    t <- walkStatement thenBranch
+    e <- walkStatement elseBranch
     return (t ++ e)
   SwitchS _ _ cases defaultCase -> do
-    caseDeps <- concat <$> mapM (walkStatement parentAbs . snd) cases
-    defaultDeps <- walkStatement parentAbs defaultCase
+    caseDeps <- concat <$> mapM (walkStatement . snd) cases
+    defaultDeps <- walkStatement defaultCase
     return (caseDeps ++ defaultDeps)
-  ForS _ _ _ _ body -> walkStatement parentAbs body
-  DefMacroS _ _ macro -> walkStatement parentAbs (macroBody macro)
+  ForS _ _ _ _ body -> walkStatement body
+  DefMacroS _ _ macro -> walkStatement (macroBody macro)
   TryCatchS _ tryBody catches finallyBody -> do
-    tryDeps <- walkStatement parentAbs tryBody
-    catchDeps <- concat <$> mapM (walkStatement parentAbs . catchBody) catches
-    finallyDeps <- walkStatement parentAbs finallyBody
+    tryDeps <- walkStatement tryBody
+    catchDeps <- concat <$> mapM (walkStatement . catchBody) catches
+    finallyDeps <- walkStatement finallyBody
     return (tryDeps ++ catchDeps ++ finallyDeps)
 
   -- Leaf statements (no nested content)

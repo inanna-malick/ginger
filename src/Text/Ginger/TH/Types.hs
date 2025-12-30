@@ -19,6 +19,7 @@ module Text.Ginger.TH.Types
   , TemplateDependency(..)
   , DepRelation(..)
   , DepLocation(..)
+  , flattenDeps
   , absolutePaths
   , relativePaths
     -- * Context type metadata
@@ -163,19 +164,20 @@ data DepLocation = DepLocation
     -- ^ Column number (1-based)
   } deriving (Show, Eq, Data, Typeable, Lift)
 
--- | A template dependency with hierarchy tracking.
--- Used to track which files a template depends on (for file watching, etc.).
+-- | A template dependency tree node.
+-- The root node represents the main template file; children represent
+-- included/extended templates, recursively.
 data TemplateDependency = TemplateDependency
   { depAbsolutePath :: FilePath
     -- ^ Full filesystem path (canonicalized)
   , depRelativePath :: FilePath
     -- ^ Path as specified in the template or include directive
-  , depIncludedBy :: Maybe FilePath
-    -- ^ Parent file's absolute path (Nothing for root template)
   , depRelation :: Maybe DepRelation
     -- ^ How this file is included (Nothing for root template)
   , depIncludeLocation :: Maybe DepLocation
     -- ^ Where the include/extends directive appears (Nothing for root)
+  , depChildren :: [TemplateDependency]
+    -- ^ Child dependencies (includes and extends from this template)
   } deriving (Show, Eq, Data, Typeable, Lift)
 
 -- | Metadata about the context type used by a template.
@@ -195,20 +197,24 @@ data TemplateContextInfo = TemplateContextInfo
 data TypedTemplate a p = TypedTemplate
   { unTypedTemplate :: Template p
     -- ^ The parsed template AST
-  , templateDependencies :: [TemplateDependency]
-    -- ^ All files this template depends on (root + transitive includes)
+  , templateDependencyTree :: TemplateDependency
+    -- ^ Dependency tree (root node is the main template)
   , templateContextInfo :: TemplateContextInfo
     -- ^ Metadata about the context type (for documentation)
   , templateAccessedFields :: [String]
     -- ^ Fields accessed in the template: @[\"user.name\", \"user.email\"]@
   } deriving (Show)
 
+-- | Flatten a dependency tree to a list (pre-order traversal).
+flattenDeps :: TemplateDependency -> [TemplateDependency]
+flattenDeps dep = dep : concatMap flattenDeps (depChildren dep)
+
 -- | Get all absolute file paths this template depends on.
 -- Useful for file watching and hot-reload systems.
 absolutePaths :: TypedTemplate a p -> [FilePath]
-absolutePaths = map depAbsolutePath . templateDependencies
+absolutePaths = map depAbsolutePath . flattenDeps . templateDependencyTree
 
 -- | Get all relative file paths this template depends on.
 -- These are the paths as specified in the template source.
 relativePaths :: TypedTemplate a p -> [FilePath]
-relativePaths = map depRelativePath . templateDependencies
+relativePaths = map depRelativePath . flattenDeps . templateDependencyTree

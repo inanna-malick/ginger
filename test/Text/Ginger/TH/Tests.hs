@@ -16,7 +16,7 @@ import Test.Tasty.QuickCheck
 
 import Control.Monad (forM_)
 import Data.List (sort, isSuffixOf, isInfixOf)
-import Data.Maybe (isNothing, isJust)
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Map.Strict as Map
@@ -25,7 +25,7 @@ import Text.Parsec.Pos (newPos, SourcePos)
 
 import Text.Ginger.AST
 import Text.Ginger.Parse (parseGinger', mkParserOptions, ParserOptions(..))
-import Text.Ginger.TH (jinja, typedTemplateFile, TypedTemplate(..), TemplateDependency(..), DepRelation(..), DepLocation(..), TemplateContextInfo(..), absolutePaths, relativePaths)
+import Text.Ginger.TH (jinja, typedTemplateFile, TypedTemplate(..), TemplateDependency(..), DepRelation(..), DepLocation(..), TemplateContextInfo(..), flattenDeps, absolutePaths, relativePaths)
 import Text.Ginger.TH.Types
 import Text.Ginger.TH.Builtins (isBuiltin, builtinNames)
 import Text.Ginger.TH.Extract (extractFromTemplate, extractVariableAccesses)
@@ -1303,16 +1303,17 @@ mainTemplate = $(typedTemplateFile ''EmptyContext "test/templates/dep-main.html"
 dependencyTests :: TestTree
 dependencyTests = testGroup "Dependency Tracking"
   [ testCase "simple template has one dependency (itself)" $ do
-      let deps = templateDependencies simpleTemplate
-      assertEqual "should have 1 dependency" 1 (length deps)
+      let root = templateDependencyTree simpleTemplate
+      let allDeps = flattenDeps root
+      assertEqual "should have 1 dependency" 1 (length allDeps)
       let relPaths = relativePaths simpleTemplate
       assertBool "relative path ends with dep-simple.html"
         (any ("dep-simple.html" `isSuffixOf`) relPaths)
 
   , testCase "template with includes has all dependencies" $ do
-      let deps = templateDependencies mainTemplate
+      let allDeps = flattenDeps $ templateDependencyTree mainTemplate
       -- main + partial + nested = 3 files
-      assertEqual "should have 3 dependencies" 3 (length deps)
+      assertEqual "should have 3 dependencies" 3 (length allDeps)
 
   , testCase "absolute paths are absolute" $ do
       let absPaths = absolutePaths mainTemplate
@@ -1329,55 +1330,49 @@ dependencyTests = testGroup "Dependency Tracking"
       assertBool "has nested" (any ("dep-nested.html" `isSuffixOf`) relPaths)
 
   , testCase "TemplateDependency has both path forms" $ do
-      let deps = templateDependencies mainTemplate
-      forM_ deps $ \dep -> do
+      let allDeps = flattenDeps $ templateDependencyTree mainTemplate
+      forM_ allDeps $ \dep -> do
         assertBool "absolute path is non-empty" (not $ null $ depAbsolutePath dep)
         assertBool "relative path is non-empty" (not $ null $ depRelativePath dep)
 
-  -- Hierarchy tracking tests
-  , testCase "root template has no parent (depIncludedBy = Nothing)" $ do
-      let deps = templateDependencies mainTemplate
-      let rootDeps = filter (isNothing . depIncludedBy) deps
-      assertEqual "should have exactly 1 root" 1 (length rootDeps)
-      let root = head rootDeps
+  -- Tree structure tests
+  , testCase "root template is at tree root" $ do
+      let root = templateDependencyTree mainTemplate
       assertBool "root should be main template"
         ("dep-main.html" `isSuffixOf` depRelativePath root)
       assertEqual "root has no relation" Nothing (depRelation root)
       assertEqual "root has no location" Nothing (depIncludeLocation root)
 
-  , testCase "included templates have parent set (depIncludedBy = Just parent)" $ do
-      let deps = templateDependencies mainTemplate
-      let includedDeps = filter (isJust . depIncludedBy) deps
-      assertEqual "should have 2 included deps" 2 (length includedDeps)
-      -- All included deps should have DepIncluded relation
-      forM_ includedDeps $ \dep -> do
-        assertEqual "should be DepIncluded" (Just DepIncluded) (depRelation dep)
-        assertBool "should have location" (isJust $ depIncludeLocation dep)
+  , testCase "included templates are children of root" $ do
+      let root = templateDependencyTree mainTemplate
+      let children = depChildren root
+      -- Main directly includes partial (1 child at root level)
+      assertEqual "root should have 1 direct child" 1 (length children)
+      let partialDep = head children
+      assertEqual "child should be DepIncluded" (Just DepIncluded) (depRelation partialDep)
+      assertBool "child should have location" (isJust $ depIncludeLocation partialDep)
 
-  , testCase "nested includes have correct parent chain (A->B->C)" $ do
-      let deps = templateDependencies mainTemplate
-      -- Find each dep by filename
-      let findDep name = head $ filter (\d -> name `isInfixOf` depRelativePath d) deps
-      let mainDep = findDep "dep-main"
-      let partialDep = findDep "dep-partial"
-      let nestedDep = findDep "dep-nested"
+  , testCase "nested includes form correct tree structure (A->B->C)" $ do
+      let root = templateDependencyTree mainTemplate
+      -- Root is main
+      assertBool "root is main" ("dep-main" `isInfixOf` depRelativePath root)
 
-      -- Main is root (no parent)
-      assertEqual "main has no parent" Nothing (depIncludedBy mainDep)
+      -- Main has one child: partial
+      assertEqual "main has 1 child" 1 (length $ depChildren root)
+      let partialDep = head $ depChildren root
+      assertBool "child is partial" ("dep-partial" `isInfixOf` depRelativePath partialDep)
 
-      -- Partial is included by main
-      assertEqual "partial parent is main"
-        (Just $ depAbsolutePath mainDep)
-        (depIncludedBy partialDep)
+      -- Partial has one child: nested
+      assertEqual "partial has 1 child" 1 (length $ depChildren partialDep)
+      let nestedDep = head $ depChildren partialDep
+      assertBool "grandchild is nested" ("dep-nested" `isInfixOf` depRelativePath nestedDep)
 
-      -- Nested is included by partial, NOT by main
-      assertEqual "nested parent is partial (not main)"
-        (Just $ depAbsolutePath partialDep)
-        (depIncludedBy nestedDep)
+      -- Nested has no children
+      assertEqual "nested has no children" 0 (length $ depChildren nestedDep)
 
   , testCase "depIncludeLocation has correct file and line info" $ do
-      let deps = templateDependencies mainTemplate
-      let partialDep = head $ filter (\d -> "dep-partial" `isInfixOf` depRelativePath d) deps
+      let root = templateDependencyTree mainTemplate
+      let partialDep = head $ depChildren root
       case depIncludeLocation partialDep of
         Nothing -> assertFailure "should have location"
         Just loc -> do
