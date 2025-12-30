@@ -72,24 +72,30 @@ module Text.Ginger.TH
     -- | Templates track their file dependencies (root + all includes).
     -- Use these to implement file watching, hot-reload, or build integration.
   , TemplateDependency(..)
+  , DepRelation(..)
+  , DepLocation(..)
   , absolutePaths
   , relativePaths
+    -- * Context type metadata
+  , TemplateContextInfo(..)
   ) where
 
 import Control.Monad (when)
 import Data.IORef
+import Data.List (nub)
 import Data.Maybe (catMaybes, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.HashMap.Strict as HashMap
 import Language.Haskell.TH
 import Language.Haskell.TH.Syntax (addDependentFile, lift)
-import Text.Parsec.Pos (SourcePos)
+import Text.Parsec.Pos (SourcePos, sourceName)
 import Data.Monoid ((<>))
 import Control.Monad.Writer (Writer)
 import System.Directory (doesFileExist, canonicalizePath)
 import System.FilePath (takeDirectory, (</>))
 
-import Text.Ginger.AST (Template)
+import Text.Ginger.AST (Template(..), Statement(..), Block(..), Macro(..), CatchBlock(..), Annotated(..))
 import Text.Ginger.GVal (ToGVal, GVal)
 import Text.Ginger.Parse (parseGinger', ParserError(..), ParserOptions(..), mkParserOptions, sourceLine, sourceColumn)
 import Text.Ginger.Run (easyRender, easyRenderM)
@@ -130,60 +136,17 @@ typedTemplateFile typeName templatePath = do
   -- Read template source at compile time
   src <- runIO $ readFile templatePath
 
-  -- Track included files for dependency registration
-  includedFilesRef <- runIO $ newIORef []
-
   -- Create a resolver that reads files
-  -- (the ginger parser computes include paths relative to the current template)
-  let resolver = ioResolver includedFilesRef
+  let resolver path = do
+        exists <- doesFileExist path
+        if exists then Just <$> readFile path else return Nothing
 
-  -- Parse and validate (returns expression for parsed template)
-  templateExp <- validateAndEmbedWithResolver typeName (Just templatePath) src resolver
-
-  -- Get all included files
-  includedDeps <- runIO $ readIORef includedFilesRef
-
-  -- Register all included files as GHC dependencies for recompilation
-  mapM_ (addDependentFile . depAbsolutePath) includedDeps
-
-  -- Build root dependency (the main template file)
-  rootAbsPath <- runIO $ canonicalizePath templatePath
-  let rootDep = TemplateDependency rootAbsPath templatePath
-  let allDeps = rootDep : includedDeps
-
-  -- Generate: TypedTemplate parsedTemplate [deps...]
-  -- Need to lift allDeps and combine with templateExp
-  depsExp <- lift allDeps
-  return $ AppE (AppE (ConE 'TypedTemplate) templateExp) depsExp
-
--- | Type-check an inline template string at compile time.
---
--- Note: Inline templates do not support @{% include %}@ directives.
--- Use 'typedTemplateFile' for templates with includes.
---
--- @
--- myTemplate :: TypedTemplate MyContext SourcePos
--- myTemplate = $(typedTemplate ''MyContext "Hello, {{ userName }}!")
--- @
---
-typedTemplate :: Name -> String -> Q Exp
-typedTemplate typeName src = do
-  templateExp <- validateAndEmbedWithResolver typeName Nothing src nullResolver
-  -- Inline templates have no file dependencies
-  emptyDepsExp <- lift ([] :: [TemplateDependency])
-  return $ AppE (AppE (ConE 'TypedTemplate) templateExp) emptyDepsExp
-
--- | Internal: validate template and emit code with a custom resolver.
--- Returns an expression that evaluates to @Template SourcePos@ (not TypedTemplate).
-validateAndEmbedWithResolver :: Name -> Maybe FilePath -> String -> (String -> IO (Maybe String)) -> Q Exp
-validateAndEmbedWithResolver typeName mPath src resolver = do
   -- Parse the template
-  let sourceName = mPath
-  let opts = (mkParserOptions resolver) { poSourceName = sourceName }
+  let opts = (mkParserOptions resolver) { poSourceName = Just templatePath }
   parseResult <- runIO $ parseGinger' opts src
 
   template <- case parseResult of
-    Left err -> fail $ formatParserErrorWithSource mPath src err
+    Left err -> fail $ formatParserErrorWithSource (Just templatePath) src err
     Right tpl -> return tpl
 
   -- Generate schema from the Haskell type
@@ -202,34 +165,204 @@ validateAndEmbedWithResolver typeName mPath src resolver = do
   when (not $ null errors) $
     fail $ formatValidationErrorsWithSource src errors
 
-  -- Generate code that parses the template at runtime
-  -- We embed the source and parse at module load time
-  -- (A more sophisticated version could add Lift instances to embed directly)
-  let srcLit = litE (stringL src)
-  let pathLit = maybe [| Nothing |] (\p -> [| Just p |]) mPath
+  -- Extract dependencies with hierarchy from AST
+  allDeps <- runIO $ extractDependenciesFromAST templatePath template
 
-  [| unsafeParseTemplateRaw $pathLit $srcLit |]
+  -- Register all with GHC for recompilation
+  mapM_ (addDependentFile . depAbsolutePath) allDeps
+
+  -- Get context type metadata
+  let simpleName = nameBase typeName
+  let moduleName = nameModule typeName
+  let fullyQualified = case moduleName of
+        Just m -> m ++ "." ++ simpleName
+        Nothing -> simpleName
+  let contextInfo = TemplateContextInfo simpleName moduleName fullyQualified
+
+  -- Get accessed fields (filter builtins, format as "root.path.to.field")
+  let accessedFields = nub $ map formatAccessPath userAccesses
+
+  -- Generate code (use lift + AppE pattern to avoid TH splice issues)
+  depsExp <- lift allDeps
+  contextInfoExp <- lift contextInfo
+  fieldsExp <- lift accessedFields
+  let srcLit = litE (stringL src)
+  let pathLit = [| Just templatePath |]
+  templateExp <- [| unsafeParseTemplateRaw $pathLit $srcLit |]
+
+  return $ foldl AppE (ConE 'TypedTemplate)
+    [templateExp, depsExp, contextInfoExp, fieldsExp]
+
+-- | Type-check an inline template string at compile time.
+--
+-- Note: Inline templates do not support @{% include %}@ directives.
+-- Use 'typedTemplateFile' for templates with includes.
+--
+-- @
+-- myTemplate :: TypedTemplate MyContext SourcePos
+-- myTemplate = $(typedTemplate ''MyContext "Hello, {{ userName }}!")
+-- @
+--
+typedTemplate :: Name -> String -> Q Exp
+typedTemplate typeName src = do
+  -- Parse the template
+  let opts = (mkParserOptions nullResolver) { poSourceName = Nothing }
+  parseResult <- runIO $ parseGinger' opts src
+
+  template <- case parseResult of
+    Left err -> fail $ formatParserErrorWithSource Nothing src err
+    Right tpl -> return tpl
+
+  -- Generate schema from the Haskell type
+  (schema, registry) <- generateSchema typeName
+
+  -- Extract variable accesses from template
+  let accesses = extractFromTemplate template
+
+  -- Filter out builtins
+  let userAccesses = filter (not . isBuiltin . apRoot) accesses
+
+  -- Validate accesses against schema
+  let errors = validatePaths registry schema userAccesses
+
+  -- Report errors or generate code
+  when (not $ null errors) $
+    fail $ formatValidationErrorsWithSource src errors
+
+  -- Get context type metadata
+  let simpleName = nameBase typeName
+  let moduleName = nameModule typeName
+  let fullyQualified = case moduleName of
+        Just m -> m ++ "." ++ simpleName
+        Nothing -> simpleName
+  let contextInfo = TemplateContextInfo simpleName moduleName fullyQualified
+
+  -- Get accessed fields
+  let accessedFields = nub $ map formatAccessPath userAccesses
+
+  -- Inline templates have no file dependencies
+  emptyDepsExp <- lift ([] :: [TemplateDependency])
+  contextInfoExp <- lift contextInfo
+  fieldsExp <- lift accessedFields
+  let srcLit = litE (stringL src)
+  templateExp <- [| unsafeParseTemplateRaw Nothing $srcLit |]
+
+  return $ foldl AppE (ConE 'TypedTemplate)
+    [templateExp, emptyDepsExp, contextInfoExp, fieldsExp]
 
 -- | Null include resolver (no includes supported for inline templates).
 nullResolver :: Monad m => String -> m (Maybe String)
 nullResolver _ = return Nothing
 
--- | File-based include resolver for typedTemplateFile.
--- The ginger parser computes include paths relative to the current template,
--- so this resolver receives paths that are ready to use directly.
--- We track both absolute and relative paths for dependency tracking.
-ioResolver :: IORef [TemplateDependency] -> String -> IO (Maybe String)
-ioResolver includedFilesRef path = do
-  exists <- doesFileExist path
-  if exists
-    then do
-      -- Canonicalize for absolute path, keep original for relative
-      absPath <- canonicalizePath path
-      let dep = TemplateDependency absPath path
-      modifyIORef includedFilesRef (dep :)
-      content <- readFile path
-      return $ Just content
-    else return Nothing
+-- | Format an AccessPath as "root.path.to.field"
+formatAccessPath :: AccessPath -> String
+formatAccessPath ap = Text.unpack (apRoot ap) ++
+  concatMap formatSegment (apPath ap)
+  where
+    formatSegment (StaticKey k) = "." ++ Text.unpack k
+    formatSegment DynamicKey = "[*]"
+
+-- | Extract dependencies with hierarchy from parsed template AST.
+-- Walks the AST to find all includes and extends, tracking parent relationships.
+extractDependenciesFromAST :: FilePath -> Template SourcePos -> IO [TemplateDependency]
+extractDependenciesFromAST rootPath tpl = do
+  rootAbs <- canonicalizePath rootPath
+  let rootDep = TemplateDependency
+        { depAbsolutePath = rootAbs
+        , depRelativePath = rootPath
+        , depIncludedBy = Nothing
+        , depRelation = Nothing
+        , depIncludeLocation = Nothing
+        }
+
+  -- Get extends dependencies (from templateParent)
+  extendsDeps <- case templateParent tpl of
+    Nothing -> return []
+    Just parentTpl -> extractExtends rootAbs parentTpl
+
+  -- Get include dependencies (from statements)
+  includeDeps <- walkStatement rootAbs (templateBody tpl)
+
+  -- Also walk blocks (they may contain includes)
+  blockDeps <- concat <$> mapM (walkStatement rootAbs . blockBody)
+                                (HashMap.elems $ templateBlocks tpl)
+
+  return (rootDep : extendsDeps ++ includeDeps ++ blockDeps)
+
+-- | Extract extends chain from templateParent
+extractExtends :: FilePath -> Template SourcePos -> IO [TemplateDependency]
+extractExtends childAbsPath parentTpl = do
+  let parentPath = getSourceFile (templateBody parentTpl)
+  -- Check for "<<unknown>>" fallback
+  if parentPath == "<<unknown>>" || null parentPath
+    then return []  -- Can't track this dependency
+    else do
+      parentAbs <- canonicalizePath parentPath
+      let pos = annotation (templateBody parentTpl)
+      let dep = TemplateDependency
+            { depAbsolutePath = parentAbs
+            , depRelativePath = parentPath
+            , depIncludedBy = Just childAbsPath
+            , depRelation = Just DepExtended
+            , depIncludeLocation = Just $ posToDepLocation pos
+            }
+      -- Recurse for nested extends and includes in parent
+      nested <- extractDependenciesFromAST parentPath parentTpl
+      return (dep : tail nested)  -- tail to skip parent's root dep
+
+-- | Walk all statement types to find includes
+walkStatement :: FilePath -> Statement SourcePos -> IO [TemplateDependency]
+walkStatement parentAbs stmt = case stmt of
+  PreprocessedIncludeS pos includedTpl -> do
+    let childPath = getSourceFile (templateBody includedTpl)
+    if childPath == "<<unknown>>" || null childPath
+      then return []
+      else do
+        childAbs <- canonicalizePath childPath
+        let dep = TemplateDependency
+              { depAbsolutePath = childAbs
+              , depRelativePath = childPath
+              , depIncludedBy = Just parentAbs
+              , depRelation = Just DepIncluded
+              , depIncludeLocation = Just $ posToDepLocation pos
+              }
+        nested <- extractDependenciesFromAST childPath includedTpl
+        return (dep : tail nested)
+
+  -- Statements with nested statements
+  MultiS _ stmts -> concat <$> mapM (walkStatement parentAbs) stmts
+  ScopedS _ body -> walkStatement parentAbs body
+  IndentS _ _ body -> walkStatement parentAbs body
+  IfS _ _ thenBranch elseBranch -> do
+    t <- walkStatement parentAbs thenBranch
+    e <- walkStatement parentAbs elseBranch
+    return (t ++ e)
+  SwitchS _ _ cases defaultCase -> do
+    caseDeps <- concat <$> mapM (walkStatement parentAbs . snd) cases
+    defaultDeps <- walkStatement parentAbs defaultCase
+    return (caseDeps ++ defaultDeps)
+  ForS _ _ _ _ body -> walkStatement parentAbs body
+  DefMacroS _ _ macro -> walkStatement parentAbs (macroBody macro)
+  TryCatchS _ tryBody catches finallyBody -> do
+    tryDeps <- walkStatement parentAbs tryBody
+    catchDeps <- concat <$> mapM (walkStatement parentAbs . catchBody) catches
+    finallyDeps <- walkStatement parentAbs finallyBody
+    return (tryDeps ++ catchDeps ++ finallyDeps)
+
+  -- Leaf statements (no nested content)
+  _ -> return []
+
+-- | Extract source file name from a statement's SourcePos
+getSourceFile :: Statement SourcePos -> FilePath
+getSourceFile stmt = sourceName (annotation stmt)
+
+-- | Convert SourcePos to DepLocation
+posToDepLocation :: SourcePos -> DepLocation
+posToDepLocation pos = DepLocation
+  { depLocFile = sourceName pos
+  , depLocLine = sourceLine pos
+  , depLocColumn = sourceColumn pos
+  }
 
 -- | Format a parser error with source context (Rust-style).
 formatParserErrorWithSource :: Maybe FilePath -> String -> ParserError -> String

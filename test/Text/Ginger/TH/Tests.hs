@@ -15,7 +15,8 @@ import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck
 
 import Control.Monad (forM_)
-import Data.List (sort, isSuffixOf)
+import Data.List (sort, isSuffixOf, isInfixOf)
+import Data.Maybe (isNothing, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Map.Strict as Map
@@ -24,7 +25,7 @@ import Text.Parsec.Pos (newPos, SourcePos)
 
 import Text.Ginger.AST
 import Text.Ginger.Parse (parseGinger', mkParserOptions, ParserOptions(..))
-import Text.Ginger.TH (jinja, typedTemplateFile, TypedTemplate(..), TemplateDependency(..), absolutePaths, relativePaths)
+import Text.Ginger.TH (jinja, typedTemplateFile, TypedTemplate(..), TemplateDependency(..), DepRelation(..), DepLocation(..), TemplateContextInfo(..), absolutePaths, relativePaths)
 import Text.Ginger.TH.Types
 import Text.Ginger.TH.Builtins (isBuiltin, builtinNames)
 import Text.Ginger.TH.Extract (extractFromTemplate, extractVariableAccesses)
@@ -1327,16 +1328,86 @@ dependencyTests = testGroup "Dependency Tracking"
       -- Nested (included from partial as 'dep-nested.html')
       assertBool "has nested" (any ("dep-nested.html" `isSuffixOf`) relPaths)
 
-  -- Note: jinja quasiquoter returns Text (rendered output), not TypedTemplate.
-  -- So we test inline templates via typedTemplate instead (can't use TH splice inline).
-  -- The typedTemplate function creates TypedTemplate with empty dependencies.
-  -- This is tested implicitly through the library implementation.
-
   , testCase "TemplateDependency has both path forms" $ do
       let deps = templateDependencies mainTemplate
       forM_ deps $ \dep -> do
         assertBool "absolute path is non-empty" (not $ null $ depAbsolutePath dep)
         assertBool "relative path is non-empty" (not $ null $ depRelativePath dep)
+
+  -- Hierarchy tracking tests
+  , testCase "root template has no parent (depIncludedBy = Nothing)" $ do
+      let deps = templateDependencies mainTemplate
+      let rootDeps = filter (isNothing . depIncludedBy) deps
+      assertEqual "should have exactly 1 root" 1 (length rootDeps)
+      let root = head rootDeps
+      assertBool "root should be main template"
+        ("dep-main.html" `isSuffixOf` depRelativePath root)
+      assertEqual "root has no relation" Nothing (depRelation root)
+      assertEqual "root has no location" Nothing (depIncludeLocation root)
+
+  , testCase "included templates have parent set (depIncludedBy = Just parent)" $ do
+      let deps = templateDependencies mainTemplate
+      let includedDeps = filter (isJust . depIncludedBy) deps
+      assertEqual "should have 2 included deps" 2 (length includedDeps)
+      -- All included deps should have DepIncluded relation
+      forM_ includedDeps $ \dep -> do
+        assertEqual "should be DepIncluded" (Just DepIncluded) (depRelation dep)
+        assertBool "should have location" (isJust $ depIncludeLocation dep)
+
+  , testCase "nested includes have correct parent chain (A->B->C)" $ do
+      let deps = templateDependencies mainTemplate
+      -- Find each dep by filename
+      let findDep name = head $ filter (\d -> name `isInfixOf` depRelativePath d) deps
+      let mainDep = findDep "dep-main"
+      let partialDep = findDep "dep-partial"
+      let nestedDep = findDep "dep-nested"
+
+      -- Main is root (no parent)
+      assertEqual "main has no parent" Nothing (depIncludedBy mainDep)
+
+      -- Partial is included by main
+      assertEqual "partial parent is main"
+        (Just $ depAbsolutePath mainDep)
+        (depIncludedBy partialDep)
+
+      -- Nested is included by partial, NOT by main
+      assertEqual "nested parent is partial (not main)"
+        (Just $ depAbsolutePath partialDep)
+        (depIncludedBy nestedDep)
+
+  , testCase "depIncludeLocation has correct file and line info" $ do
+      let deps = templateDependencies mainTemplate
+      let partialDep = head $ filter (\d -> "dep-partial" `isInfixOf` depRelativePath d) deps
+      case depIncludeLocation partialDep of
+        Nothing -> assertFailure "should have location"
+        Just loc -> do
+          assertBool "location file should be main"
+            ("dep-main" `isInfixOf` depLocFile loc)
+          -- The include directive spans lines 2-3 in dep-main.html
+          -- Parsec captures the position after the closing %}
+          assertBool "location line should be near the include (2-3)"
+            (depLocLine loc >= 2 && depLocLine loc <= 3)
+
+  -- Context info tests
+  , testCase "templateContextInfo has type name" $ do
+      let info = templateContextInfo mainTemplate
+      assertEqual "type name should be EmptyContext"
+        "EmptyContext" (tciTypeName info)
+
+  , testCase "templateContextInfo has module name" $ do
+      let info = templateContextInfo mainTemplate
+      assertEqual "module should be Text.Ginger.TH.TestTypes"
+        (Just "Text.Ginger.TH.TestTypes") (tciModuleName info)
+
+  , testCase "templateContextInfo has fully qualified name" $ do
+      let info = templateContextInfo mainTemplate
+      assertEqual "fully qualified should be Text.Ginger.TH.TestTypes.EmptyContext"
+        "Text.Ginger.TH.TestTypes.EmptyContext" (tciFullyQualified info)
+
+  -- Accessed fields tests (simple template has no fields, so use one that does)
+  , testCase "templateAccessedFields is empty for template with no variable access" $ do
+      let fields = templateAccessedFields simpleTemplate
+      assertEqual "simple template has no accessed fields" [] fields
   ]
 
 --------------------------------------------------------------------------------

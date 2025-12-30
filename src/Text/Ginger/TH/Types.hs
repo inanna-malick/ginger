@@ -17,8 +17,12 @@ module Text.Ginger.TH.Types
   , TypedTemplate(..)
     -- * Template dependencies
   , TemplateDependency(..)
+  , DepRelation(..)
+  , DepLocation(..)
   , absolutePaths
   , relativePaths
+    -- * Context type metadata
+  , TemplateContextInfo(..)
   ) where
 
 import Data.Text (Text)
@@ -142,13 +146,47 @@ data ValidationError
     -- The Text describes why the type is opaque (e.g., "non-record sum type").
   deriving (Show, Eq, Data, Typeable)
 
--- | A template dependency with both absolute and relative path forms.
+-- | How a template dependency is related to its parent.
+data DepRelation
+  = DepIncluded   -- ^ @{% include \"file\" %}@
+  | DepExtended   -- ^ @{% extends \"file\" %}@
+  deriving (Show, Eq, Data, Typeable, Lift)
+
+-- | Location of an include/extends directive in source.
+-- Used for error messages and documentation.
+data DepLocation = DepLocation
+  { depLocFile :: FilePath
+    -- ^ File containing the directive
+  , depLocLine :: Int
+    -- ^ Line number (1-based)
+  , depLocColumn :: Int
+    -- ^ Column number (1-based)
+  } deriving (Show, Eq, Data, Typeable, Lift)
+
+-- | A template dependency with hierarchy tracking.
 -- Used to track which files a template depends on (for file watching, etc.).
 data TemplateDependency = TemplateDependency
   { depAbsolutePath :: FilePath
     -- ^ Full filesystem path (canonicalized)
   , depRelativePath :: FilePath
     -- ^ Path as specified in the template or include directive
+  , depIncludedBy :: Maybe FilePath
+    -- ^ Parent file's absolute path (Nothing for root template)
+  , depRelation :: Maybe DepRelation
+    -- ^ How this file is included (Nothing for root template)
+  , depIncludeLocation :: Maybe DepLocation
+    -- ^ Where the include/extends directive appears (Nothing for root)
+  } deriving (Show, Eq, Data, Typeable, Lift)
+
+-- | Metadata about the context type used by a template.
+-- Useful for documentation generation.
+data TemplateContextInfo = TemplateContextInfo
+  { tciTypeName :: String
+    -- ^ Simple type name: @\"MyContext\"@
+  , tciModuleName :: Maybe String
+    -- ^ Module containing the type: @Just \"MyModule.Types\"@ or @Nothing@ if local
+  , tciFullyQualified :: String
+    -- ^ Fully qualified name: @\"MyModule.Types.MyContext\"@
   } deriving (Show, Eq, Data, Typeable, Lift)
 
 -- | A template that has been type-checked against a specific context type.
@@ -159,6 +197,10 @@ data TypedTemplate a p = TypedTemplate
     -- ^ The parsed template AST
   , templateDependencies :: [TemplateDependency]
     -- ^ All files this template depends on (root + transitive includes)
+  , templateContextInfo :: TemplateContextInfo
+    -- ^ Metadata about the context type (for documentation)
+  , templateAccessedFields :: [String]
+    -- ^ Fields accessed in the template: @[\"user.name\", \"user.email\"]@
   } deriving (Show)
 
 -- | Get all absolute file paths this template depends on.
