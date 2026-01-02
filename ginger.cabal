@@ -92,6 +92,7 @@ test-suite tests
     main-is: Spec.hs
     other-modules: Text.Ginger.PropertyTests
                  , Text.Ginger.SimulationTests
+                 , Text.Ginger.ExpressionTests
                  , Text.Ginger.TH.Tests
                  , Text.Ginger.TH.TestTypes
     hs-source-dirs: test

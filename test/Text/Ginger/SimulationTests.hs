@@ -1250,22 +1250,22 @@ simulationTests = testGroup "Simulation"
             mkTestHtml [] []
                 "{{sum(1, 2, 3)}}"
                 "6"
-        , testGroup "\"truncate\""
+        , testGroup "\"int\" (numeric truncation)"
             [ testCase "14.1" $ do
                 mkTestHtml [] []
-                    "{{ 14.1|truncate }}"
+                    "{{ 14.1|int }}"
                     "14"
             , testCase "14.8" $ do
                 mkTestHtml [] []
-                    "{{ 14.8|truncate }}"
+                    "{{ 14.8|int }}"
                     "14"
             , testCase "-14.1" $ do
                 mkTestHtml [] []
-                    "{{ -14.1|truncate }}"
+                    "{{ -14.1|int }}"
                     "-14"
             , testCase "-14.8" $ do
                 mkTestHtml [] []
-                    "{{ -14.8|truncate }}"
+                    "{{ -14.8|int }}"
                     "-14"
             ]
         , testCase "\"urlencode\"" $ do

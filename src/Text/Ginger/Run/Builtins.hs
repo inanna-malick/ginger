@@ -333,6 +333,29 @@ gfnSlice args =
                             slice (Text.unpack $ asText slicee) startInt lengthInt
         _ -> throwHere $ ArgumentsError (Just "slice") "expected: (slicee, start=0, length=null)"
 
+-- | Truncate a string to a given length, adding an ellipsis if truncated.
+-- Jinja2 compatible: truncate(s, length=255, end='...')
+-- The length parameter is the maximum length INCLUDING the end string.
+gfnTruncateString :: Monad m => Function (Run p m h)
+gfnTruncateString args =
+    let argValues =
+            extractArgsDefL
+                [ ("s", def)
+                , ("length", toGVal (255 :: Int))
+                , ("end", toGVal ("..." :: Text))
+                ]
+                args
+    in case argValues of
+        Right [s, lengthVal, endVal] -> do
+            let str = asText s
+                maxLen = maybe 255 Prelude.round . asNumber $ lengthVal
+                endStr = asText endVal
+                endLen = Text.length endStr
+            if Text.length str <= maxLen
+                then return $ toGVal str
+                else return $ toGVal $ Text.take (maxLen - endLen) str <> endStr
+        _ -> throwHere $ ArgumentsError (Just "truncate") "expected: (s, length=255, end='...')"
+
 gfnReplace :: Monad m => Function (Run p m h)
 gfnReplace args =
     let argValues =

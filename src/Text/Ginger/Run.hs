@@ -197,7 +197,7 @@ defaultScope =
     , ("split", fromFunction gfnSplit)
     , ("str", fromFunction . unaryFunc $ toGVal . asText)
     , ("sum", fromFunction . variadicNumericFunc 0 $ Prelude.sum)
-    , ("truncate", fromFunction . unaryNumericFunc 0 $ Prelude.fromIntegral . Prelude.truncate)
+    , ("truncate", fromFunction gfnTruncateString)
     , ("urlencode", fromFunction gfnUrlEncode)
     , ("upper", fromFunction . variadicStringFunc $ mconcat . Prelude.map Text.toUpper)
     , ("lower", fromFunction . variadicStringFunc $ mconcat . Prelude.map Text.toLower)
